@@ -2,3 +2,6 @@
 output/
 .venv/
 *.session
+results/
+__pycache__/
+.vscode/

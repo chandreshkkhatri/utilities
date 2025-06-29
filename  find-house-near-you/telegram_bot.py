@@ -32,8 +32,8 @@ class HouseHuntingBot:
             key=os.getenv('GOOGLE_MAPS_API_KEY'))
 
         # Office location
-        self.office_lat = float(os.getenv('OFFICE_LATITUDE', 28.7041))
-        self.office_lon = float(os.getenv('OFFICE_LONGITUDE', 77.1025))
+        self.office_lat = float(os.getenv('OFFICE_LATITUDE', '28.7041'))
+        self.office_lon = float(os.getenv('OFFICE_LONGITUDE', '77.1025'))
         self.office_address = os.getenv('OFFICE_ADDRESS', 'Delhi, India')
 
         # Results storage
@@ -265,23 +265,25 @@ class HouseHuntingBot:
             print(f"   💬 Message: {result['original_message'][:100]}...")
             print("-" * 40)
 
+    def save_results(self, filename: str = "house_hunting_results.json"):
+        """Save results to a JSON file."""
+        filepath = os.path.join('results', filename)
+        with open(filepath, 'w') as f:
+            json.dump(self.results, f, indent=4)
+        print(f"✅ Results saved to {filepath}")
+
     def save_results_to_csv(self, filename: str = "house_hunting_results.csv"):
         """Save results to a CSV file."""
         if not self.results:
             return
 
+        filepath = os.path.join('results', filename)
         keys = self.results[0].keys()
-        with open(filename, 'w', newline='', encoding='utf-8') as output_file:
-            dict_writer = csv.DictWriter(output_file, fieldnames=keys)
+        with open(filepath, 'w', newline='') as output_file:
+            dict_writer = csv.DictWriter(output_file, keys)
             dict_writer.writeheader()
             dict_writer.writerows(self.results)
-        print(f"💾 Results saved to {filename}")
-
-    def save_results(self, filename: str = "house_hunting_results.json"):
-        """Save results to a JSON file."""
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(self.results, f, indent=2, ensure_ascii=False)
-        print(f"💾 Results saved to {filename}")
+        print(f"✅ Results saved to {filepath}")
 
 
 def main():
