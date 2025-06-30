@@ -1,12 +1,10 @@
 import os
-import json
 import csv
 import time
 import re
 from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
@@ -195,6 +193,21 @@ class FacebookGroupScraper:
     def extract_post_data(self, post_element):
         """Extract text and metadata from a Facebook post."""
         try:
+            # Expand 'See more' links within the post to reveal full content
+            see_more_xpaths = [
+                ".//span[contains(text(), 'See more')]",
+                ".//span[contains(text(), 'See More')]"
+            ]
+            for xpath in see_more_xpaths:
+                try:
+                    buttons = post_element.find_elements(By.XPATH, xpath)
+                    for btn in buttons:
+                        self.driver.execute_script(
+                            "arguments[0].click();", btn)
+                        time.sleep(0.5)
+                except Exception:
+                    pass
+
             # Extract post text - trying multiple selectors for different Facebook layouts
             text_selectors = [
                 "[data-ad-preview='message']",
@@ -246,11 +259,33 @@ class FacebookGroupScraper:
             except Exception as e:
                 print(f"⚠️ Error extracting timestamp: {e}")
 
+            # Get post URL
+            post_url = ''
+            # First, try to get URL from time element's parent link
+            try:
+                time_elem = post_element.find_element(By.TAG_NAME, 'time')
+                parent_link = time_elem.find_element(By.XPATH, './ancestor::a')
+                post_url = parent_link.get_attribute('href')
+            except:
+                pass
+            # Fallback to any link matching common post patterns
+            if not post_url:
+                try:
+                    link_elem = post_element.find_element(
+                        By.XPATH,
+                        ".//a[contains(@href, '/posts/') or contains(@href, '/permalink/') or contains(@href, 'story.php')]"
+                    )
+                    post_url = link_elem.get_attribute('href')
+                except:
+                    pass
+            # Normalize URL to canonical group post link
+            post_url = self.normalize_post_url(post_url)
+
             return {
                 'text': post_text,
                 'timestamp': timestamp,
-                # First 500 chars for debugging
-                'raw_html': post_element.get_attribute('innerHTML')[:500]
+                'raw_html': post_element.get_attribute('innerHTML')[:500],
+                'post_url': post_url
             }
 
         except Exception as e:
@@ -301,6 +336,28 @@ class FacebookGroupScraper:
         except Exception:
             return False
 
+    def is_rental_post(self, text: str) -> bool:
+        """Use GPT or keyword-based fallback to determine if post is about renting property."""
+        try:
+            prompt = (
+                f"Determine if this Facebook post is about renting residential property. "
+                f"Reply YES or NO.\nText: '''{text}'''"
+            )
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=5
+            )
+            answer = response.choices[0].message.content.strip().lower()
+            return answer.startswith("yes")
+        except Exception:
+            # Fallback to simple keyword check
+            keywords = ['rent', 'for rent', 'room for rent',
+                        'apartment for rent', 'flat for rent', 'house for rent']
+            text_lower = text.lower()
+            return any(k in text_lower for k in keywords)
+
     def process_group_posts(self, group_url_or_name, max_posts=50):
         """Main method to scrape and process Facebook group posts in batches with aggregated CSV outputs."""
         print("🏠 Facebook Group House Hunting Started")
@@ -334,20 +391,14 @@ class FacebookGroupScraper:
             except Exception as e:
                 print(f"⚠️ Could not switch feed to New listings: {e}")
 
-            # Initialize aggregated CSV files
-            raw_master = 'results/facebook_raw.csv'
+            # Initialize aggregated results CSV (no raw posts CSV)
             res_master = 'results/facebook_results.csv'
-            # Create/overwrite raw CSV
-            with open(raw_master, 'w', newline='') as rf:
-                writer = csv.writer(rf)
-                writer.writerow(['id', 'text', 'timestamp'])
-            # Create/overwrite results CSV with known headers
-            with open(res_master, 'w', newline='') as rf:
+            with open(res_master, 'w', newline='', encoding='utf-8') as rf:
                 writer = csv.writer(rf)
                 writer.writerow([
                     'message_id', 'date', 'location', 'city', 'rent', 'bhk',
                     'additional_details', 'latitude', 'longitude',
-                    'distance_from_office_km', 'driving_duration',
+                    'distance_from_office_km', 'driving_duration', 'post_url',
                     'source', 'group_name'
                 ])
 
@@ -361,14 +412,23 @@ class FacebookGroupScraper:
 
                 batch_posts = posts[self.posts_processed:target_load]
 
-                # Append raw batch to aggregated CSV
-                with open(raw_master, 'a', newline='') as rf:
+                # Save raw batch to CSV with post URLs and debug info
+                raw_file = f"results/facebook_raw_{self.posts_processed+1}_{target_load}.csv"
+                with open(raw_file, 'w', newline='', encoding='utf-8') as rf:
                     writer = csv.writer(rf)
+                    writer.writerow(
+                        ['id', 'text', 'timestamp', 'post_url'])
                     for idx, post in enumerate(batch_posts, start=self.posts_processed+1):
                         data = self.extract_post_data(post) or {}
                         text = ' '.join(data.get('text', '').split())
+                        # Skip empty or non-rental posts
+                        if not text or not self.is_rental_post(text):
+                            continue
                         timestamp = data.get('timestamp', '')
-                        writer.writerow([f"fb_post_{idx}", text, timestamp])
+                        post_url = data.get('post_url', '')
+                        writer.writerow(
+                            [f"fb_post_{idx}", text, timestamp, post_url])
+                print(f"🔖 Raw batch saved to {raw_file}")
 
                 # Process batch and append results
                 batch_results = []
@@ -377,8 +437,13 @@ class FacebookGroupScraper:
                         post_data = self.extract_post_data(post)
                         if not post_data or not post_data['text']:
                             continue
+                        # Skip non-rental and preference-excluding posts
+                        if not self.is_rental_post(post_data['text']):
+                            continue
                         if self.skip_based_on_preference(post_data['text']):
                             continue
+                        # Extract post URL from post_data
+                        post_url = post_data.get('post_url', '')
                         message = type('FacebookPost', (), {
                             'text': post_data['text'],
                             'date': post_data['timestamp'],
@@ -386,27 +451,32 @@ class FacebookGroupScraper:
                         })()
                         result = self.bot.process_message(message)
                         if result:
-                            result.update(
-                                {'source': 'facebook_group', 'group_name': group_url_or_name})
+                            result.update({
+                                'source': 'facebook_group',
+                                'group_name': group_url_or_name,
+                                'post_url': post_url
+                            })
                             batch_results.append(result)
                             self.bot.results.append(result)
                             print(
-                                f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office")
+                                f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office"
+                            )
                     except Exception as e:
                         print(f"⚠️ Error processing post {idx}: {e}")
                         continue
 
                 if batch_results:
-                    with open(res_master, 'a', newline='') as rf:
+                    with open(res_master, 'a', newline='', encoding='utf-8') as rf:
                         writer = csv.writer(rf)
                         for result in batch_results:
                             writer.writerow([
                                 result['message_id'], result['date'], result['location'],
                                 result.get('city', ''), result.get('rent', ''),
-                                result.get('bhk', ''), result.get('additional_details', ''),
+                                result.get('bhk', ''), result.get(
+                                    'additional_details', ''),
                                 result['latitude'], result['longitude'],
                                 result['distance_from_office_km'], result['driving_duration'],
-                                result['source'], result['group_name']
+                                result['post_url'], result['source'], result['group_name']
                             ])
 
                 self.posts_processed = target_load
@@ -431,6 +501,22 @@ class FacebookGroupScraper:
             self.bot.display_results(sort_by_distance=True)
         else:
             print("❌ No results to save")
+
+    def normalize_post_url(self, url: str) -> str:
+        """Normalize Facebook post URL to canonical group post link format."""
+        if not url:
+            return url
+        # Match /groups/.../posts/<post_id>
+        m = re.search(
+            r"(https://www\.facebook\.com/groups/[^/]+/posts/\d+)", url)
+        if m:
+            return m.group(1) + '/'
+        # Match story.php links with story_fbid
+        m2 = re.search(r"story\.php\?story_fbid=(\d+)&id=(\d+)", url)
+        if m2:
+            post_id, group_id = m2.group(1), m2.group(2)
+            return f"https://www.facebook.com/groups/{group_id}/posts/{post_id}/"
+        return url
 
 
 def main():
