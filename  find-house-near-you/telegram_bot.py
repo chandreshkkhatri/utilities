@@ -145,7 +145,8 @@ class HouseHuntingBot:
         if not extracted_info or not extracted_info.get('location'):
             return None
         # Geocoding
-        coords = self.get_coordinates(extracted_info['location'], extracted_info.get('city'))
+        coords = self.get_coordinates(
+            extracted_info['location'], extracted_info.get('city'))
         if not coords:
             return None
         lat, lon = coords
@@ -154,7 +155,8 @@ class HouseHuntingBot:
         if not dist_info:
             return None
         # Telegram link
-        link = self.get_telegram_link(message, chat_entity) if chat_entity else None
+        link = self.get_telegram_link(
+            message, chat_entity) if chat_entity else None
         # Build result
         result = {
             'message_id': message.id,
@@ -198,10 +200,12 @@ class HouseHuntingBot:
                 try:
                     target_entity = client.get_entity(int(self.target_peer_id))
                 except (ValueError, TypeError):
-                    print(f"⚠️ Invalid TARGET_PEER_ID: '{self.target_peer_id}'. Must be an integer. Falling back to TARGET_CHAT.")
+                    print(
+                        f"⚠️ Invalid TARGET_PEER_ID: '{self.target_peer_id}'. Must be an integer. Falling back to TARGET_CHAT.")
                     target_entity = client.get_entity(self.target_chat)
                 except Exception as e:
-                    print(f"⚠️ Could not find entity for peer ID {self.target_peer_id}: {e}. Falling back to TARGET_CHAT.")
+                    print(
+                        f"⚠️ Could not find entity for peer ID {self.target_peer_id}: {e}. Falling back to TARGET_CHAT.")
                     target_entity = client.get_entity(self.target_chat)
             else:
                 # Fetch entity for target_chat (username or ID)
