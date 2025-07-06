@@ -69,6 +69,23 @@ FACEBOOK_MAX_POSTS=50
 # CHROME_PROFILE=Profile 1
 ```
 
+## Configuration
+
+Ensure you have the following environment variables set in your `.env` file:
+
+- `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`
+- `TELEGRAM_PHONE`
+- `OPENAI_API_KEY`
+- `GOOGLE_MAPS_API_KEY`
+- **Either** `TARGET_CHAT` **or** `TARGET_PEER_ID` (preferred):
+  - `TARGET_CHAT`: the username of the Telegram channel or group (e.g. `RentRadar.in`)
+  - `TARGET_PEER_ID`: the numeric peer ID of the chat (for supergroups/channels use the `-100...` ID)
+
+Setting `TARGET_CHAT` to a group/channel username ensures that generated links are in the form `https://t.me/<username>/<message_id>`.  
+If you use `TARGET_PEER_ID`, the bot will generate links like `https://t.me/c/<clean_id>/<message_id>` (where `<clean_id>` is the peer ID without the `-100` prefix).
+
+Make sure to rerun the bot after updating these variables to regenerate results with proper Telegram post links.
+
 ## Usage
 
 ### Option 1: Unified Interface (Recommended)

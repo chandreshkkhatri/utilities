@@ -139,7 +139,7 @@ class FacebookGroupScraper:
             "return document.body.scrollHeight")
 
         # More robust selector for posts
-        post_selector = "div[role='feed'] > div"
+        post_selector = "div.x1a2a7pz[aria-posinset]"
 
         posts_found = 0
 
@@ -363,6 +363,7 @@ class FacebookGroupScraper:
         print("🏠 Facebook Group House Hunting Started")
         print(f"📍 Office Location: {self.bot.office_address}")
         print(f"👥 Target Group: {group_url_or_name}")
+        os.makedirs('results/html', exist_ok=True)
         print("-" * 50)
 
         try:
@@ -417,53 +418,49 @@ class FacebookGroupScraper:
                 with open(raw_file, 'w', newline='', encoding='utf-8') as rf:
                     writer = csv.writer(rf)
                     writer.writerow(
-                        ['id', 'text', 'timestamp', 'post_url'])
+                        ['message_id', 'text', 'timestamp', 'post_url'])
+                    raw_data_list = []
                     for idx, post in enumerate(batch_posts, start=self.posts_processed+1):
+                        # Validate that the element still matches our selector
+                        try:
+                            if not (post.get_attribute('class') and 'x1a2a7pz' in post.get_attribute('class')
+                                    and post.get_attribute('aria-posinset')):
+                                print(
+                                    f"⚠️ Skipping element {idx} - doesn't match post selector")
+                                continue
+                        except Exception as e:
+                            print(f"⚠️ Error validating element {idx}: {e}")
+                            continue
+
+                        # Block 1: Save HTML
+                        html_path = f"results/html/fb_post_{idx}.html"
+                        self.save_post_html(post, html_path)
+
+                        # Block 2: Extract raw info
                         data = self.extract_post_data(post) or {}
+                        data['message_id'] = f"fb_post_{idx}"
+                        data['html_file'] = html_path
                         text = ' '.join(data.get('text', '').split())
-                        # Skip empty or non-rental posts
                         if not text or not self.is_rental_post(text):
                             continue
-                        timestamp = data.get('timestamp', '')
-                        post_url = data.get('post_url', '')
-                        writer.writerow(
-                            [f"fb_post_{idx}", text, timestamp, post_url])
+                        raw_data_list.append(data)
+                        writer.writerow([data['message_id'], text, data.get(
+                            'timestamp', ''), data.get('post_url', '')])
                 print(f"🔖 Raw batch saved to {raw_file}")
 
-                # Process batch and append results
                 batch_results = []
-                for idx, post in enumerate(batch_posts, start=self.posts_processed+1):
-                    try:
-                        post_data = self.extract_post_data(post)
-                        if not post_data or not post_data['text']:
-                            continue
-                        # Skip non-rental and preference-excluding posts
-                        if not self.is_rental_post(post_data['text']):
-                            continue
-                        if self.skip_based_on_preference(post_data['text']):
-                            continue
-                        # Extract post URL from post_data
-                        post_url = post_data.get('post_url', '')
-                        message = type('FacebookPost', (), {
-                            'text': post_data['text'],
-                            'date': post_data['timestamp'],
-                            'id': f"fb_post_{idx}"
-                        })()
-                        result = self.bot.process_message(message)
-                        if result:
-                            result.update({
-                                'source': 'facebook_group',
-                                'group_name': group_url_or_name,
-                                'post_url': post_url
-                            })
-                            batch_results.append(result)
-                            self.bot.results.append(result)
-                            print(
-                                f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office"
-                            )
-                    except Exception as e:
-                        print(f"⚠️ Error processing post {idx}: {e}")
+                # Block 3: Process extracted data
+                for data in raw_data_list:
+                    # Skip based on preferences
+                    if self.skip_based_on_preference(data['text']):
                         continue
+                    result = self.process_raw_data(data)
+                    if result:
+                        result.update({'group_name': group_url_or_name})
+                        batch_results.append(result)
+                        self.bot.results.append(result)
+                        print(
+                            f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office")
 
                 if batch_results:
                     with open(res_master, 'a', newline='', encoding='utf-8') as rf:
@@ -517,6 +514,28 @@ class FacebookGroupScraper:
             post_id, group_id = m2.group(1), m2.group(2)
             return f"https://www.facebook.com/groups/{group_id}/posts/{post_id}/"
         return url
+
+    def save_post_html(self, post_element, file_path):
+        """Save HTML of a post element to a file."""
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        html = post_element.get_attribute('innerHTML')
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+
+    def process_raw_data(self, raw_data):
+        """Process raw data dict to extract fields important to us."""
+        message = type('FacebookPost', (), {
+            'text': raw_data.get('text', ''),
+            'date': raw_data.get('timestamp'),
+            'id': raw_data.get('message_id')
+        })()
+        result = self.bot.process_message(message)
+        if result:
+            result.update({
+                'post_url': raw_data.get('post_url', ''),
+                'source': 'facebook_group'
+            })
+        return result
 
 
 def main():

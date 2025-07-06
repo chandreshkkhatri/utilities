@@ -115,30 +115,47 @@ class HouseHuntingBot:
             print(f"Error calculating distance: {e}")
             return None
 
-    def process_message(self, message) -> Optional[Dict]:
+    def get_telegram_link(self, message, chat_entity) -> Optional[str]:
+        """Generate a Telegram link to the specific message."""
+        # Try public username first
+        username = getattr(chat_entity, 'username', None)
+        if username:
+            return f"https://t.me/{username}/{message.id}"
+        # Fallback to chat ID based link for groups, supergroups, or private chats
+        chat_id = getattr(chat_entity, 'id', None)
+        if chat_id is not None:
+            id_str = str(chat_id)
+            # For supergroups, remove '-100' prefix
+            if id_str.startswith('-100'):
+                clean_id = id_str[4:]
+            # For other negative IDs, remove leading '-'
+            elif id_str.startswith('-'):
+                clean_id = id_str[1:]
+            else:
+                clean_id = id_str
+            return f"https://t.me/c/{clean_id}/{message.id}"
+        return None
+
+    def process_message(self, message, chat_entity=None) -> Optional[Dict]:
         """Process a single message and extract rental information."""
         if not message.text:
             return None
-
+        # Extract property details
         extracted_info = self.extract_location_with_gpt(message.text)
-
         if not extracted_info or not extracted_info.get('location'):
             return None
-
-        coordinates = self.get_coordinates(
-            extracted_info['location'],
-            extracted_info.get('city')
-        )
-
-        if not coordinates:
+        # Geocoding
+        coords = self.get_coordinates(extracted_info['location'], extracted_info.get('city'))
+        if not coords:
             return None
-
-        lat, lon = coordinates
-        distance_info = self.calculate_distance(lat, lon)
-
-        if not distance_info:
+        lat, lon = coords
+        # Distance calculation
+        dist_info = self.calculate_distance(lat, lon)
+        if not dist_info:
             return None
-
+        # Telegram link
+        link = self.get_telegram_link(message, chat_entity) if chat_entity else None
+        # Build result
         result = {
             'message_id': message.id,
             'date': message.date.strftime('%Y-%m-%d %H:%M'),
@@ -149,11 +166,11 @@ class HouseHuntingBot:
             'additional_details': extracted_info.get('additional_details'),
             'latitude': lat,
             'longitude': lon,
-            'distance_from_office_km': distance_info['distance_km'],
-            'driving_duration': distance_info['duration'],
-            'original_message': message.text[:200] + "..." if len(message.text) > 200 else message.text
+            'distance_from_office_km': dist_info['distance_km'],
+            'driving_duration': dist_info['duration'],
+            'telegram_link': link,
+            'original_message': message.text[:200] + '...' if len(message.text) > 200 else message.text
         }
-
         return result
 
     def run_analysis(self, limit: Optional[int] = None):
@@ -175,20 +192,20 @@ class HouseHuntingBot:
 
             print(f"✅ Connected to Telegram")
 
-            # Determine target entity
-            target_entity = self.target_chat
+            # Determine target entity (always fetch the Entity object)
             if self.target_peer_id:
+                # telethon can get entity from integer peer id
                 try:
-                    # telethon can get entity from integer peer id
                     target_entity = client.get_entity(int(self.target_peer_id))
                 except (ValueError, TypeError):
-                    print(
-                        f"⚠️ Invalid TARGET_PEER_ID: '{self.target_peer_id}'. Must be an integer. Falling back to TARGET_CHAT.")
-                    target_entity = self.target_chat
+                    print(f"⚠️ Invalid TARGET_PEER_ID: '{self.target_peer_id}'. Must be an integer. Falling back to TARGET_CHAT.")
+                    target_entity = client.get_entity(self.target_chat)
                 except Exception as e:
-                    print(
-                        f"⚠️ Could not find entity for peer ID {self.target_peer_id}: {e}. Falling back to TARGET_CHAT.")
-                    target_entity = self.target_chat
+                    print(f"⚠️ Could not find entity for peer ID {self.target_peer_id}: {e}. Falling back to TARGET_CHAT.")
+                    target_entity = client.get_entity(self.target_chat)
+            else:
+                # Fetch entity for target_chat (username or ID)
+                target_entity = client.get_entity(self.target_chat)
 
             if isinstance(target_entity, str):
                 entity_name = target_entity
@@ -215,7 +232,7 @@ class HouseHuntingBot:
                     self.save_results()
                     self.save_results_to_csv()
 
-                result = self.process_message(message)
+                result = self.process_message(message, target_entity)
                 if result:
                     found_properties += 1
                     self.results.append(result)
@@ -262,6 +279,8 @@ class HouseHuntingBot:
             if result['additional_details']:
                 print(f"   ℹ️  Details: {result['additional_details']}")
             print(f"   📅 Posted: {result['date']}")
+            if result.get('telegram_link'):
+                print(f"   🔗 Telegram Link: {result['telegram_link']}")
             print(f"   💬 Message: {result['original_message'][:100]}...")
             print("-" * 40)
 
