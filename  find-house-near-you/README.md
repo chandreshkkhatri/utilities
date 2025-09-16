@@ -11,6 +11,8 @@ A multi-platform Python application to extract rental property listings from **T
 - 🔄 Auto-scroll WhatsApp Web and Facebook Groups to load full chat/post history
 - 🔑 Optional Chrome profile reuse for session persistence
 - ⚠️ Multiple robust selectors for Facebook's dynamic content
+- 🧩 Chrome Extension: extract rental details from any website selection with AI parsing, view results in a table, and export CSV
+  - Supports selecting multiple posts at once: split by blank lines or separators
 
 ## Prerequisites
 
@@ -143,6 +145,29 @@ Outputs:
 - `facebook_house_hunting_results.json`
 - `facebook_house_hunting_results.csv`
 
+### Option 3: Chrome Extension (Recommended for Facebook and general web)
+
+The extension lets you select any text on a page (e.g., a Facebook/Reddit/Forum housing post) and extract structured rental details using AI or a regex fallback.
+
+1. Open Chrome and go to: chrome://extensions
+2. Enable "Developer mode" (top right)
+3. Click "Load unpacked" and select the `extension` folder in this repository
+4. Click the extension icon (puzzle piece), pin "Find House Near You - Extractor"
+5. Open the extension's Options page to set:
+   - OpenAI-compatible Base URL (default: https://api.openai.com/v1)
+   - API Key and Model (e.g., gpt-4o-mini)
+   - Optional: Google Maps API Key, office latitude/longitude, and enable distance calculation
+6. On any page, select the rental post text, right-click, and choose: "Extract rental details from selection"
+7. Open the popup to see the results table and export CSV.
+   - Tip: You can select multiple posts at once. The extension splits by blank lines (or separators like ---) and parses each as a separate entry.
+
+Notes:
+
+- AI parsing requires an API key. Without it, the extension uses a heuristic regex fallback (less accurate).
+- For distance calculation, both Google Maps API key and office coordinates are needed.
+- Results are stored locally in the browser (chrome.storage.local); settings sync with your account (chrome.storage.sync).
+- The extension performs requests from your browser only; no external server is used by this project.
+
 ## Customization
 
 - **Message Limit**: In `main.py`, adjust `bot.run_analysis(limit=N)` to restrict number of Telegram messages.
@@ -168,6 +193,10 @@ Outputs:
 - **API Errors**: Check your OpenAI/Google Maps credentials and usage quotas.
 - **Facebook Login Issues**: Ensure you're logged into the correct Facebook account and have access to the target group.
 - **Rate Limiting**: If Facebook blocks requests, try reducing scroll speed or using longer delays.
+- **Extension not loading**: Ensure Manifest V3 is supported (recent Chrome). Use "Load unpacked" on the `extension` directory.
+- **No AI results**: Set your API key and model in the Options page. Verify billing/quotas with your AI provider.
+- **Distance not shown**: Add Google Maps API key, enable "Compute distance", and set your office coordinates in Options.
+- **CSV empty**: Ensure you've extracted at least one result via right-click or the popup paste-parse.
 
 ## License
 

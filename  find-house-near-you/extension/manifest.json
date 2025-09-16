@@ -1,0 +1,36 @@
+{
+    "manifest_version": 3,
+    "name": "Find House Near You - Extractor",
+    "version": "0.1.0",
+    "description": "Select rental post text on any site to extract location, rent, BHK, and more. View results and export CSV.",
+    "action": {
+        "default_popup": "popup.html",
+        "default_title": "Find House Near You"
+    },
+    "background": {
+        "service_worker": "background.js"
+    },
+    "options_page": "options.html",
+    "permissions": [
+        "storage",
+        "contextMenus",
+        "activeTab",
+        "scripting"
+    ],
+    "host_permissions": [
+        "https://api.openai.com/*",
+        "https://*.openai.azure.com/*",
+        "https://maps.googleapis.com/*"
+    ],
+    "content_scripts": [
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "content_script.js"
+            ],
+            "run_at": "document_end"
+        }
+    ]
+}

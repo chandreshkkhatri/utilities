@@ -1,0 +1,29 @@
+:root {
+  --border: #e5e7eb;
+  --bg: #ffffff;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: #111827;
+}
+
+table {
+  font-size: 12px;
+}
+th,
+td {
+  border-color: var(--border) !important;
+}
+
+section {
+  margin: 14px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+button {
+  cursor: pointer;
+}
