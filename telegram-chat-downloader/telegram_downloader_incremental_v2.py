@@ -533,6 +533,7 @@ class IncrementalTelegramDownloader:
         download_media_later: bool = True,
         batch_size: int = 50,
         max_messages: Optional[int] = None,
+        min_id: int = 0,
         resume: bool = True
     ):
         """Download messages incrementally - text first, then media"""
@@ -628,6 +629,7 @@ class IncrementalTelegramDownloader:
                             channel,
                             limit=current_batch_size,
                             offset_id=offset_id,
+                            min_id=min_id,
                             reverse=False
                         ):
                             # Parse message WITHOUT downloading media
@@ -807,12 +809,28 @@ class IncrementalTelegramDownloader:
 
 
 async def main():
-    API_ID = int(os.getenv('API_ID', '0'))
+    api_id_env = os.getenv('API_ID', '0')
     API_HASH = os.getenv('API_HASH', '')
     PHONE = os.getenv('PHONE', '')
     
-    if not all([API_ID, API_HASH, PHONE]):
-        print("Please set API_ID, API_HASH, and PHONE in your .env file")
+    # Validation for placeholder values
+    is_placeholder = 'your_api_id_here' in api_id_env or 'your_api_hash_here' in API_HASH or 'your_phone_number_here' in PHONE
+    
+    if is_placeholder or not all([api_id_env != '0', API_HASH, PHONE]):
+        print("\n❌ Error: Missing or invalid API credentials in .env file.")
+        print("Please edit the .env file and replace the placeholder values with your actual Telegram API details.")
+        print("\nTo get your API credentials:")
+        print("1. Go to https://my.telegram.org")
+        print("2. Log in with your phone number")
+        print("3. Go to 'API development tools'")
+        print("4. Create an app if you haven't already")
+        print("5. Copy your api_id and api_hash")
+        return
+        
+    try:
+        API_ID = int(api_id_env)
+    except ValueError:
+        print(f"\n❌ Error: API_ID must be a number. Found: '{api_id_env}'")
         return
     
     print("\n" + "="*60)
@@ -908,6 +926,9 @@ async def main():
         batch_size = int(input("Batch size (10-200) [default: 100]: ") or "100")
         batch_size = max(10, min(200, batch_size))
         
+        min_id_str = input("Stop at message ID (e.g. to skip already downloaded messages, Enter for none): ")
+        min_id = int(min_id_str) if min_id_str else 0
+        
         print("\n" + "="*60)
         print("Starting download... (Press Ctrl+C to pause)")
         print("="*60)
@@ -918,6 +939,7 @@ async def main():
             download_media_later=True,
             batch_size=batch_size,
             max_messages=max_messages,
+            min_id=min_id,
             resume=True
         )
         
