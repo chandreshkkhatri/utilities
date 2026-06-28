@@ -407,6 +407,20 @@ class HouseHuntingBot:
             print(f"   💬 Message: {result['original_message'][:100]}...")
             print("-" * 40)
 
+    def load_existing_results(self, filename: str):
+        """Load previously saved results from JSON if it exists."""
+        os.makedirs('results', exist_ok=True)
+        filepath = os.path.join('results', filename)
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self.results = data
+                        print(f"📂 Loaded {len(self.results)} existing properties from {filepath}")
+            except Exception as e:
+                print(f"⚠️ Failed to load existing results from {filepath}: {e}")
+
     def save_results(self, filename: str = "house_hunting_results.json"):
         """Save results to a JSON file."""
         filepath = os.path.join('results', filename)

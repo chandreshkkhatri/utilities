@@ -309,17 +309,24 @@ class FacebookGroupScraper:
         print(f"👥 Target Group ID: {group_id}")
         print("-" * 50)
 
+        # Load existing results to prevent duplicates
+        self.bot.load_existing_results('facebook_results.json')
+        processed_ids = {r.get('message_id') for r in self.bot.results if r.get('message_id')}
+        processed_urls = {r.get('post_url') for r in self.bot.results if r.get('post_url')}
+
         # Initialize results files & directories
         os.makedirs('results', exist_ok=True)
         res_master = 'results/facebook_results.csv'
-        with open(res_master, 'w', newline='', encoding='utf-8') as rf:
-            writer = csv.writer(rf)
-            writer.writerow([
-                'message_id', 'date', 'location', 'city', 'rent', 'bhk',
-                'additional_details', 'latitude', 'longitude',
-                'distance_from_office_km', 'driving_duration', 'post_url',
-                'source', 'group_name'
-            ])
+        file_exists = os.path.exists(res_master) and os.path.getsize(res_master) > 0
+        if not file_exists:
+            with open(res_master, 'w', newline='', encoding='utf-8') as rf:
+                writer = csv.writer(rf)
+                writer.writerow([
+                    'message_id', 'date', 'location', 'city', 'rent', 'bhk',
+                    'additional_details', 'latitude', 'longitude',
+                    'distance_from_office_km', 'driving_duration', 'post_url',
+                    'source', 'group_name'
+                ])
 
         api_url = f"https://graph.facebook.com/v25.0/{group_id}/feed"
         params = {
@@ -359,11 +366,17 @@ class FacebookGroupScraper:
                     if posts_fetched >= max_posts:
                         break
                     
-                    posts_fetched += 1
                     post_id = post.get('id')
+                    post_url = post.get('permalink_url', f"https://www.facebook.com/groups/{group_id}/posts/{post_id}/")
+
+                    # Skip already processed posts
+                    if post_id in processed_ids or post_url in processed_urls:
+                        print(f"⏭️ Skipping already processed post (API): {post_id}")
+                        continue
+
+                    posts_fetched += 1
                     message_text = post.get('message', '')
                     created_time = post.get('created_time')
-                    post_url = post.get('permalink_url', f"https://www.facebook.com/groups/{group_id}/posts/{post_id}/")
 
                     if not message_text:
                         continue
@@ -451,16 +464,22 @@ class FacebookGroupScraper:
             except Exception as e:
                 print(f"⚠️ Could not switch feed to New listings: {e}")
 
+            # Load existing results to prevent duplicates
+            self.bot.load_existing_results('facebook_house_hunting_results.json')
+            processed_urls = {r.get('post_url') for r in self.bot.results if r.get('post_url')}
+
             # Initialize aggregated results CSV
             res_master = 'results/facebook_results.csv'
-            with open(res_master, 'w', newline='', encoding='utf-8') as rf:
-                writer = csv.writer(rf)
-                writer.writerow([
-                    'message_id', 'date', 'location', 'city', 'rent', 'bhk',
-                    'additional_details', 'latitude', 'longitude',
-                    'distance_from_office_km', 'driving_duration', 'post_url',
-                    'source', 'group_name'
-                ])
+            file_exists = os.path.exists(res_master) and os.path.getsize(res_master) > 0
+            if not file_exists:
+                with open(res_master, 'w', newline='', encoding='utf-8') as rf:
+                    writer = csv.writer(rf)
+                    writer.writerow([
+                        'message_id', 'date', 'location', 'city', 'rent', 'bhk',
+                        'additional_details', 'latitude', 'longitude',
+                        'distance_from_office_km', 'driving_duration', 'post_url',
+                        'source', 'group_name'
+                    ])
 
             batch_size = 20  # Reduce batch size to 20 posts
             while self.posts_processed < max_posts:
@@ -498,6 +517,12 @@ class FacebookGroupScraper:
                             data = self.extract_post_data(post) or {}
                             data['message_id'] = f"fb_post_{idx+1}"
                             data['html_file'] = html_path
+
+                            post_url = data.get('post_url')
+                            if post_url and post_url in processed_urls:
+                                print(f"⏭️ Skipping already processed post (URL): {post_url}")
+                                continue
+
                             text = ' '.join(data.get('text', '').split())
                             if not text or not self.is_rental_post(text):
                                 continue
