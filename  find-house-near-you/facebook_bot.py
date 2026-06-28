@@ -17,6 +17,51 @@ class FacebookGroupScraper:
         self.context = None
         self.page = None
         self.posts_processed = 0
+        self.group_dir = 'results'
+
+    def get_safe_group_dir_name(self, group_url_or_name: str) -> str:
+        """Derive a safe directory name from a Facebook group URL or name."""
+        url = group_url_or_name.rstrip('/')
+        if 'facebook.com/groups/' in url:
+            parts = url.split('facebook.com/groups/')
+            if len(parts) > 1:
+                group_name = parts[1].split('/')[0].split('?')[0]
+                return ''.join(c for c in group_name if c.isalnum() or c in ['-', '_'])
+        clean_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', group_url_or_name.strip())
+        return re.sub(r'_+', '_', clean_name).lower()
+
+    def choose_group_dir_interactively(self) -> Optional[str]:
+        """Find directories in results/ containing facebook_raw_posts.json and ask user to choose."""
+        if not os.path.exists('results'):
+            return None
+            
+        choices = []
+        for entry in os.listdir('results'):
+            full_path = os.path.join('results', entry)
+            if os.path.isdir(full_path):
+                raw_json = os.path.join(full_path, 'facebook_raw_posts.json')
+                if os.path.exists(raw_json):
+                    choices.append(entry)
+                    
+        if not choices:
+            return None
+            
+        if len(choices) == 1:
+            print(f"📁 Automatically selected only available group cache: '{choices[0]}'")
+            return os.path.join('results', choices[0])
+            
+        print("\n📂 Select group cache directory to analyze:")
+        for idx, choice in enumerate(choices):
+            print(f"{idx+1}. {choice}")
+            
+        selected_idx = -1
+        while selected_idx < 0 or selected_idx >= len(choices):
+            try:
+                ans = input(f"Enter choice (1-{len(choices)}): ").strip()
+                selected_idx = int(ans) - 1
+            except ValueError:
+                pass
+        return os.path.join('results', choices[selected_idx])
 
     def setup_playwright(self):
         """Setup Playwright Chrome instance with Facebook-optimized settings."""
@@ -254,23 +299,15 @@ class FacebookGroupScraper:
             return datetime.now()
 
     def skip_based_on_preference(self, text: str) -> bool:
-        """Use LLM to determine if the listing excludes males (female-only) or is family-only."""
-        try:
-            prompt = (
-                f"Determine if this rental listing text indicates that the listing is "
-                f"for female-only or family-only tenants. Reply YES or NO.\nText: '''{text}'''"
-            )
-            response = self.bot.call_llm(
-                prompt=prompt,
-                temperature=0.0,
-                max_tokens=5
-            )
-            if not response:
-                return False
-            answer = response.strip().lower()
-            return answer.startswith("yes")
-        except Exception:
-            return False
+        """Deprecated preference filter. We now extract structured enums instead of skipping."""
+        return False
+
+    def log_ingestion(self, message: str):
+        """Append a message to facebook_ingestion_log.txt inside the group's directory."""
+        os.makedirs(self.group_dir, exist_ok=True)
+        log_path = os.path.join(self.group_dir, 'facebook_ingestion_log.txt')
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(message + '\n')
 
     def is_rental_post(self, text: str) -> bool:
         """Use LLM or keyword-based fallback to determine if post is about renting property."""
@@ -281,8 +318,9 @@ class FacebookGroupScraper:
             )
             response = self.bot.call_llm(
                 prompt=prompt,
+                system_instruction="Reply with only YES or NO. Do not add any introduction or explanations.",
                 temperature=0.0,
-                max_tokens=5
+                max_tokens=15
             )
             if response:
                 answer = response.strip().lower()
@@ -316,6 +354,7 @@ class FacebookGroupScraper:
                 writer = csv.writer(rf)
                 writer.writerow([
                     'message_id', 'date', 'location', 'city', 'rent', 'bhk',
+                    'gender_preference', 'furnishing_status',
                     'additional_details', 'latitude', 'longitude',
                     'distance_from_office_km', 'driving_duration', 'post_url',
                     'source', 'group_name'
@@ -374,10 +413,18 @@ class FacebookGroupScraper:
                     if not message_text:
                         continue
 
-                    if not self.is_rental_post(message_text):
-                        continue
+                    is_rental = self.is_rental_post(message_text)
+                    
+                    log_entry = (
+                        f"=== Post ID: {post_id} (API Mode) ===\n"
+                        f"URL: {post_url}\n"
+                        f"Text Preview: {message_text[:300]}...\n"
+                        f"Is Rental Post: {is_rental}\n"
+                    )
 
-                    if self.skip_based_on_preference(message_text):
+                    if not is_rental:
+                        log_entry += "Result: SKIPPED (Not classified as rental post)\n\n"
+                        self.log_ingestion(log_entry)
                         continue
 
                     timestamp = datetime.now()
@@ -396,11 +443,26 @@ class FacebookGroupScraper:
                     
                     result = self.process_raw_data(raw_data)
                     if result:
+                        log_entry += (
+                            f"Result: PROCESSED\n"
+                            f"  Location: {result.get('location')}\n"
+                            f"  City: {result.get('city')}\n"
+                            f"  Rent: {result.get('rent')}\n"
+                            f"  BHK: {result.get('bhk')}\n"
+                            f"  Gender Preference: {result.get('gender_preference')}\n"
+                            f"  Furnishing Status: {result.get('furnishing_status')}\n"
+                            f"  Distance: {result.get('distance_from_office_km')} km\n\n"
+                        )
+                        self.log_ingestion(log_entry)
+                        
                         result.update({'group_name': group_id})
                         batch_results.append(result)
                         self.bot.results.append(result)
                         found_properties += 1
                         print(f"🏡 Found property #{found_properties}: {result['location']} - {result['distance_from_office_km']}km from office")
+                    else:
+                        log_entry += "Result: SKIPPED (AI extraction failed or empty location)\n\n"
+                        self.log_ingestion(log_entry)
 
                 if batch_results:
                     with open(res_master, 'a', newline='', encoding='utf-8') as rf:
@@ -409,7 +471,10 @@ class FacebookGroupScraper:
                             writer.writerow([
                                 result['message_id'], result['date'], result['location'],
                                 result.get('city', ''), result.get('rent', ''),
-                                result.get('bhk', ''), result.get('additional_details', ''),
+                                result.get('bhk', ''), 
+                                result.get('gender_preference', 'any'),
+                                result.get('furnishing_status', 'unfurnished'),
+                                result.get('additional_details', ''),
                                 result['latitude'], result['longitude'],
                                 result['distance_from_office_km'], result['driving_duration'],
                                 result['post_url'], result['source'], result['group_name']
@@ -428,13 +493,21 @@ class FacebookGroupScraper:
         print(f"✅ API Ingestion done. Fetched {posts_fetched} posts, found {found_properties} properties.")
         return True
 
-    def process_group_posts(self, group_url_or_name, max_posts=50):
+    def process_group_posts(self, group_url_or_name, max_posts=50, scrape_only=False):
         """Main method to scrape and process Facebook group posts in batches with aggregated CSV outputs."""
+        safe_name = self.get_safe_group_dir_name(group_url_or_name)
+        self.group_dir = os.path.join('results', safe_name)
+        os.makedirs(os.path.join(self.group_dir, 'html'), exist_ok=True)
+        
         print("🏠 Facebook Group House Hunting Started")
         print(f"📍 Office Location: {self.bot.office_address}")
         print(f"👥 Target Group: {group_url_or_name}")
-        os.makedirs('results/html', exist_ok=True)
+        print(f"📁 Saving to directory: {self.group_dir}")
         print("-" * 50)
+
+        # Load existing raw posts cache
+        existing_raw_posts = self.load_raw_posts()
+        raw_posts_dict = {p.get('post_url'): p for p in existing_raw_posts if p.get('post_url')}
 
         try:
             self.setup_playwright()
@@ -458,67 +531,120 @@ class FacebookGroupScraper:
                 print(f"⚠️ Could not switch feed to New listings: {e}")
 
             # Load existing results to prevent duplicates
-            self.bot.load_existing_results('facebook_house_hunting_results.json')
+            self.bot.load_existing_results(f'{safe_name}/facebook_house_hunting_results.json')
             processed_urls = {r.get('post_url') for r in self.bot.results if r.get('post_url')}
 
             # Initialize aggregated results CSV
-            res_master = 'results/facebook_results.csv'
+            res_master = os.path.join(self.group_dir, 'facebook_results.csv')
             file_exists = os.path.exists(res_master) and os.path.getsize(res_master) > 0
             if not file_exists:
                 with open(res_master, 'w', newline='', encoding='utf-8') as rf:
                     writer = csv.writer(rf)
                     writer.writerow([
                         'message_id', 'date', 'location', 'city', 'rent', 'bhk',
+                        'gender_preference', 'furnishing_status',
                         'additional_details', 'latitude', 'longitude',
                         'distance_from_office_km', 'driving_duration', 'post_url',
                         'source', 'group_name'
                     ])
 
-            batch_size = 20  # Reduce batch size to 20 posts
-            while self.posts_processed < max_posts:
-                target_load = min(self.posts_processed + batch_size, max_posts)
-                loaded_count = self.scroll_and_load_posts(max_posts=target_load)
-                if loaded_count <= self.posts_processed:
-                    print("📄 No new posts to process")
-                    break
+            processed_in_run = set()
+            start_time = time.time()
+            max_scroll_time = 300
+            post_selector = "div.x1a2a7pz[aria-posinset]:not([data-processed='true'])"
+            scroll_retries = 0
 
-                actual_target = min(target_load, loaded_count)
+            while self.posts_processed < max_posts and (time.time() - start_time) < max_scroll_time:
+                # Count current posts in DOM
+                post_locator = self.page.locator(post_selector)
+                current_count = post_locator.count()
 
-                # Save raw batch to CSV with post URLs and debug info
-                raw_file = f"results/facebook_raw_{self.posts_processed+1}_{actual_target}.csv"
+                # Scan the DOM for unprocessed posts
+                new_elements_in_dom = []
+                for idx in range(current_count):
+                    post = post_locator.nth(idx)
+                    try:
+                        cls = post.get_attribute('class') or ''
+                        if 'x1a2a7pz' not in cls:
+                            continue
+                    except:
+                        continue
+
+                    # Try to check post URL before scrolling to avoid unnecessary clicks/viewport resets
+                    post_url = ""
+                    try:
+                        time_elem = post.locator('time')
+                        if time_elem.count() > 0:
+                            parent_link = time_elem.locator("xpath=./ancestor::a")
+                            if parent_link.count() > 0:
+                                post_url = parent_link.first.get_attribute('href')
+                    except:
+                        pass
+                    if not post_url:
+                        try:
+                            link_locator = post.locator("a[href*='/posts/'], a[href*='/permalink/'], a[href*='story.php']")
+                            if link_locator.count() > 0:
+                                post_url = link_locator.first.get_attribute('href')
+                        except:
+                            pass
+                    post_url = self.normalize_post_url(post_url)
+
+                    # Skip if we already processed this URL in this run or historically
+                    if post_url and (post_url in processed_urls or post_url in processed_in_run):
+                        continue
+
+                    new_elements_in_dom.append((idx, post, post_url))
+
+                if not new_elements_in_dom:
+                    # Scroll to trigger loading more posts
+                    print("🔄 Scrolling down to load more posts...")
+                    self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    self.page.wait_for_timeout(3000)
+
+                    new_count = post_locator.count()
+                    if new_count <= current_count:
+                        scroll_retries += 1
+                        if scroll_retries >= 3:
+                            print("📄 No new posts loaded after 3 scrolls. Ending scraper.")
+                            break
+                    else:
+                        scroll_retries = 0
+                    continue
+
+                # Reset scroll retries as we found new elements
+                scroll_retries = 0
+
+                # Process in small batches of 10
+                batch_limit = min(10, len(new_elements_in_dom))
+                target_elements = new_elements_in_dom[:batch_limit]
+
+                raw_file = os.path.join(self.group_dir, f"facebook_raw_{self.posts_processed+1}_{self.posts_processed + batch_limit}.csv")
                 try:
                     with open(raw_file, 'w', newline='', encoding='utf-8') as rf:
                         writer = csv.writer(rf)
                         writer.writerow(
                             ['message_id', 'text', 'timestamp', 'post_url'])
                         raw_data_list = []
-                        post_locator = self.page.locator("div.x1a2a7pz[aria-posinset]")
-                        for idx in range(self.posts_processed, actual_target):
-                            post = post_locator.nth(idx)
+                        for idx_in_dom, post, post_url in target_elements:
                             try:
-                                cls = post.get_attribute('class') or ''
-                                if 'x1a2a7pz' not in cls:
-                                    print(f"⚠️ Skipping element {idx+1} - doesn't match post selector")
-                                    continue
+                                # Scroll this specific post into view to force rendering of DOM text structure
+                                post.scroll_into_view_if_needed(timeout=2000)
+                                self.page.wait_for_timeout(500)  # Brief pause to let rendering complete
+                                post.evaluate("el => el.setAttribute('data-processed', 'true')")
                             except Exception as e:
-                                print(f"⚠️ Error validating element {idx+1}: {e}")
+                                print(f"⚠️ Error preparing element: {e}")
                                 continue
 
-                            html_path = f"results/html/fb_post_{idx+1}.html"
+                            html_path = os.path.join(self.group_dir, 'html', f"fb_post_{self.posts_processed + len(raw_data_list) + 1}.html")
                             self.save_post_html(post, html_path)
 
                             data = self.extract_post_data(post) or {}
-                            data['message_id'] = f"fb_post_{idx+1}"
+                            data['message_id'] = f"fb_post_{self.posts_processed + len(raw_data_list) + 1}"
                             data['html_file'] = html_path
-
-                            post_url = data.get('post_url')
-                            if post_url and post_url in processed_urls:
-                                print(f"⏭️ Skipping already processed post (URL): {post_url}")
-                                continue
+                            if not data.get('post_url') and post_url:
+                                data['post_url'] = post_url
 
                             text = ' '.join(data.get('text', '').split())
-                            if not text or not self.is_rental_post(text):
-                                continue
                             raw_data_list.append(data)
                             writer.writerow([data['message_id'], text, data.get(
                                 'timestamp', ''), data.get('post_url', '')])
@@ -526,15 +652,84 @@ class FacebookGroupScraper:
 
                     batch_results = []
                     for data in raw_data_list:
-                        if self.skip_based_on_preference(data['text']):
+                        post_url = data.get('post_url')
+                        text = ' '.join(data.get('text', '').split())
+
+                        # Unique signature matching: use URL if present, otherwise hash the alphanumeric text snippet
+                        signature = post_url if post_url else f"hash_{hash(''.join(e for e in text if e.isalnum()).lower()[:100])}"
+
+                        if signature in processed_in_run or (post_url and post_url in processed_urls):
+                            print(f"⏭️ Skipping already processed post (signature): {signature}")
                             continue
+
+                        processed_in_run.add(signature)
+
+                        if not text:
+                            # Log empty posts explicitly to know they were parsed but returned blank
+                            log_entry = (
+                                f"=== Post ID: {data['message_id']} (Scraper Mode) ===\n"
+                                f"URL: {post_url or 'N/A'}\n"
+                                f"Text Preview: (Empty/Could not extract text)\n"
+                                f"Result: SKIPPED (Empty text)\n\n"
+                            )
+                            self.log_ingestion(log_entry)
+                            continue
+
+                        # If scrape_only, collect the raw post data, save it to cache, and proceed
+                        if scrape_only:
+                            if not post_url or post_url not in raw_posts_dict:
+                                raw_entry = {
+                                    'message_id': data['message_id'],
+                                    'text': text,
+                                    'timestamp': str(data.get('timestamp') or datetime.now()),
+                                    'post_url': post_url,
+                                    'html_file': data.get('html_file', ''),
+                                    'group_name': group_url_or_name
+                                }
+                                existing_raw_posts.append(raw_entry)
+                                if post_url:
+                                    raw_posts_dict[post_url] = raw_entry
+                                print(f"📝 Scraped raw post: {data['message_id']} - URL: {post_url or 'N/A'}")
+                            continue
+
+                        is_rental = self.is_rental_post(text)
+                        
+                        log_entry = (
+                            f"=== Post ID: {data['message_id']} (Scraper Mode) ===\n"
+                            f"URL: {post_url or 'N/A'}\n"
+                            f"Text Preview: {text[:300]}...\n"
+                            f"Is Rental Post: {is_rental}\n"
+                        )
+
+                        if not is_rental:
+                            log_entry += "Result: SKIPPED (Not classified as rental post)\n\n"
+                            self.log_ingestion(log_entry)
+                            continue
+
                         result = self.process_raw_data(data)
                         if result:
+                            log_entry += (
+                                f"Result: PROCESSED\n"
+                                f"  Location: {result.get('location')}\n"
+                                f"  City: {result.get('city')}\n"
+                                f"  Rent: {result.get('rent')}\n"
+                                f"  BHK: {result.get('bhk')}\n"
+                                f"  Gender Preference: {result.get('gender_preference')}\n"
+                                f"  Furnishing Status: {result.get('furnishing_status')}\n"
+                                f"  Distance: {result.get('distance_from_office_km')} km\n\n"
+                            )
+                            self.log_ingestion(log_entry)
+                            
                             result.update({'group_name': group_url_or_name})
                             batch_results.append(result)
                             self.bot.results.append(result)
+                            if post_url:
+                                processed_urls.add(post_url)
                             print(
                                 f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office")
+                        else:
+                            log_entry += "Result: SKIPPED (AI extraction failed or empty location)\n\n"
+                            self.log_ingestion(log_entry)
 
                     if batch_results:
                         with open(res_master, 'a', newline='', encoding='utf-8') as rf:
@@ -543,7 +738,10 @@ class FacebookGroupScraper:
                                 writer.writerow([
                                     result['message_id'], result['date'], result['location'],
                                     result.get('city', ''), result.get('rent', ''),
-                                    result.get('bhk', ''), result.get('additional_details', ''),
+                                    result.get('bhk', ''),
+                                    result.get('gender_preference', 'any'),
+                                    result.get('furnishing_status', 'unfurnished'),
+                                    result.get('additional_details', ''),
                                     result['latitude'], result['longitude'],
                                     result['distance_from_office_km'], result['driving_duration'],
                                     result['post_url'], result['source'], result['group_name']
@@ -553,9 +751,16 @@ class FacebookGroupScraper:
                     print("Stopping Facebook scraping and saving current progress...")
                     break
 
-                self.posts_processed = actual_target
-                if self.posts_processed < max_posts:
-                    print(f"🔄 Loading next batch...")
+                self.posts_processed += len(raw_data_list)
+                if scrape_only:
+                    self.save_raw_posts(existing_raw_posts)
+                else:
+                    safe_name = os.path.basename(self.group_dir)
+                    self.bot.save_results(f'{safe_name}/facebook_results.json')
+                
+                # Scroll once at the end of the batch to push feed down and load new elements
+                self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                self.page.wait_for_timeout(1000)
 
             print(f"✅ All done. Processed {self.posts_processed} posts")
 
@@ -568,10 +773,11 @@ class FacebookGroupScraper:
                 self.playwright.stop()
 
     def save_results(self, filename_prefix="facebook_house_hunting"):
-        """Save results using the HouseHuntingBot methods."""
+        """Save results using the HouseHuntingBot methods inside self.group_dir."""
+        safe_name = os.path.basename(self.group_dir)
         if self.bot.results:
-            self.bot.save_results(f'results/{filename_prefix}_results.json')
-            self.bot.save_results_to_csv(f'results/{filename_prefix}_results.csv')
+            self.bot.save_results(f'{safe_name}/{filename_prefix}_results.json')
+            self.bot.save_results_to_csv(f'{safe_name}/{filename_prefix}_results.csv')
             self.bot.display_results(sort_by_distance=True)
         else:
             print("❌ No results to save")
@@ -601,9 +807,26 @@ class FacebookGroupScraper:
 
     def process_raw_data(self, raw_data):
         """Process raw data dict to extract fields important to us."""
+        timestamp = raw_data.get('timestamp')
+        if isinstance(timestamp, str):
+            try:
+                t_str = timestamp.strip()
+                if ' ' in t_str:
+                    if '.' in t_str:
+                        timestamp = datetime.strptime(t_str, "%Y-%m-%d %H:%M:%S.%f")
+                    else:
+                        timestamp = datetime.strptime(t_str, "%Y-%m-%d %H:%M:%S")
+                else:
+                    timestamp = datetime.fromisoformat(t_str)
+            except Exception as e:
+                print(f"⚠️ Failed to parse timestamp '{timestamp}': {e}. Using current time.")
+                timestamp = datetime.now()
+        elif not timestamp:
+            timestamp = datetime.now()
+
         message = type('FacebookPost', (), {
             'text': raw_data.get('text', ''),
-            'date': raw_data.get('timestamp'),
+            'date': timestamp,
             'id': raw_data.get('message_id')
         })()
         result = self.bot.process_message(message)
@@ -614,21 +837,184 @@ class FacebookGroupScraper:
             })
         return result
 
+    def load_raw_posts(self) -> list:
+        """Load raw posts from facebook_raw_posts.json inside self.group_dir."""
+        filepath = os.path.join(self.group_dir, 'facebook_raw_posts.json')
+        if os.path.exists(filepath):
+            try:
+                import json
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"⚠️ Failed to load raw posts from {filepath}: {e}")
+        return []
+
+    def save_raw_posts(self, raw_posts):
+        """Save raw posts list to facebook_raw_posts.json inside self.group_dir."""
+        os.makedirs(self.group_dir, exist_ok=True)
+        filepath = os.path.join(self.group_dir, 'facebook_raw_posts.json')
+        try:
+            import json
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(raw_posts, f, indent=4, ensure_ascii=False)
+            print(f"💾 Saved {len(raw_posts)} raw posts to {filepath}")
+        except Exception as e:
+            print(f"⚠️ Failed to save raw posts to {filepath}: {e}")
+
+    def analyze_scraped_posts(self):
+        """Analyze previously scraped posts from results/facebook_raw_posts.json using LLM + Google Maps."""
+        self.group_dir = self.choose_group_dir_interactively()
+        if not self.group_dir:
+            print("❌ No raw posts found to analyze. Please run the scraper first.")
+            return
+
+        safe_name = os.path.basename(self.group_dir)
+        print(f"\n🤖 Starting Offline AI Analysis of Scraped Facebook Posts for '{safe_name}'")
+        print("=" * 50)
+        
+        raw_posts = self.load_raw_posts()
+        if not raw_posts:
+            print("❌ No raw posts found in this directory.")
+            return
+
+        self.bot.load_existing_results(f'{safe_name}/facebook_house_hunting_results.json')
+        processed_urls = {r.get('post_url') for r in self.bot.results if r.get('post_url')}
+
+        res_master = os.path.join(self.group_dir, 'facebook_results.csv')
+        file_exists = os.path.exists(res_master) and os.path.getsize(res_master) > 0
+        if not file_exists:
+            with open(res_master, 'w', newline='', encoding='utf-8') as rf:
+                writer = csv.writer(rf)
+                writer.writerow([
+                    'message_id', 'date', 'location', 'city', 'rent', 'bhk',
+                    'gender_preference', 'furnishing_status',
+                    'additional_details', 'latitude', 'longitude',
+                    'distance_from_office_km', 'driving_duration', 'post_url',
+                    'source', 'group_name'
+                ])
+
+        total_posts = len(raw_posts)
+        processed_count = 0
+        added_count = 0
+
+        print(f"📊 Loaded {total_posts} raw posts. Starting processing...")
+        
+        try:
+            for idx, post in enumerate(raw_posts):
+                post_url = post.get('post_url')
+                text = post.get('text', '')
+                message_id = post.get('message_id', f"fb_post_{idx+1}")
+                group_name = post.get('group_name', 'unknown')
+
+                # Skip if already in final results
+                if post_url and post_url in processed_urls:
+                    print(f"⏭️ [{idx+1}/{total_posts}] Skipping already processed post (URL): {post_url}")
+                    continue
+
+                processed_count += 1
+                print(f"🤖 [{idx+1}/{total_posts}] Processing {message_id}...")
+
+                is_rental = self.is_rental_post(text)
+                
+                log_entry = (
+                    f"=== Post ID: {message_id} (Analyzer Mode) ===\n"
+                    f"URL: {post_url or 'N/A'}\n"
+                    f"Text Preview: {text[:300]}...\n"
+                    f"Is Rental Post: {is_rental}\n"
+                )
+
+                if not is_rental:
+                    log_entry += "Result: SKIPPED (Not classified as rental post)\n\n"
+                    self.log_ingestion(log_entry)
+                    continue
+
+                # Prepare raw_data dict format matching process_raw_data expectations
+                raw_data = {
+                    'text': text,
+                    'timestamp': post.get('timestamp'),
+                    'message_id': message_id,
+                    'post_url': post_url
+                }
+
+                result = self.process_raw_data(raw_data)
+                if result:
+                    log_entry += (
+                        f"Result: PROCESSED\n"
+                        f"  Location: {result.get('location')}\n"
+                        f"  City: {result.get('city')}\n"
+                        f"  Rent: {result.get('rent')}\n"
+                        f"  BHK: {result.get('bhk')}\n"
+                        f"  Gender Preference: {result.get('gender_preference')}\n"
+                        f"  Furnishing Status: {result.get('furnishing_status')}\n"
+                        f"  Distance: {result.get('distance_from_office_km')} km\n\n"
+                    )
+                    self.log_ingestion(log_entry)
+                    
+                    result.update({'group_name': group_name})
+                    self.bot.results.append(result)
+                    if post_url:
+                        processed_urls.add(post_url)
+                    
+                    # Write to final CSV
+                    with open(res_master, 'a', newline='', encoding='utf-8') as rf:
+                        writer = csv.writer(rf)
+                        writer.writerow([
+                            result['message_id'], result['date'], result['location'],
+                            result.get('city', ''), result.get('rent', ''),
+                            result.get('bhk', ''),
+                            result.get('gender_preference', 'any'),
+                            result.get('furnishing_status', 'unfurnished'),
+                            result.get('additional_details', ''),
+                            result['latitude'], result['longitude'],
+                            result['distance_from_office_km'], result['driving_duration'],
+                            result['post_url'], result['source'], result['group_name']
+                        ])
+                    
+                    added_count += 1
+                    print(f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office")
+                else:
+                    log_entry += "Result: SKIPPED (AI extraction failed or empty location)\n\n"
+                    self.log_ingestion(log_entry)
+
+            self.bot.save_results(f'{safe_name}/facebook_results.json')
+            print(f"\n✅ Analysis complete. Processed {processed_count} new posts, found {added_count} matching listings.")
+
+        except QuotaExceededError as qe:
+            print(f"\n🛑 LLM Quota Exceeded during offline analysis: {qe}")
+            self.bot.save_results(f'{safe_name}/facebook_results.json')
+            print("Progress saved.")
+        except Exception as e:
+            print(f"❌ Error during analysis: {e}")
+            self.bot.save_results(f'{safe_name}/facebook_results.json')
+
 
 def main():
     load_dotenv()
 
-    # Get credentials for API mode
+    print("\n📘 Facebook Group House Hunting Options:")
+    print("1. 📥 Scrape group posts only (fast, saves raw text offline)")
+    print("2. 🤖 Run Offline AI Analysis on previously scraped posts")
+    print("3. ⚡ Scrape & Analyze simultaneously (classic mode)")
+    
+    choice = ""
+    while choice not in ['1', '2', '3']:
+        choice = input("Enter choice (1-3): ").strip()
+
+    scraper = FacebookGroupScraper()
+
+    if choice == '2':
+        scraper.analyze_scraped_posts()
+        return
+
+    # API or Playwright choice for scraping modes
     api_token = os.getenv('FB_ACCESS_TOKEN')
     group_id = os.getenv('FB_GROUP_ID')
     max_posts = int(os.getenv('FACEBOOK_MAX_POSTS', '50'))
 
-    scraper = FacebookGroupScraper()
-
     # If API token and Group ID are provided, try Graph API mode first
     api_success = False
     if api_token and group_id:
-        print("🔑 FB_ACCESS_TOKEN and FB_GROUP_ID found. Attempting Graph API ingestion...")
+        print("🔑 FB_ACCESS_TOKEN and FB_GROUP_ID found. Attempting Graph API Ingestion...")
         api_success = scraper.process_group_posts_via_api(group_id.strip(), api_token.strip(), max_posts)
         if api_success:
             scraper.save_results()
@@ -642,11 +1028,13 @@ def main():
         group_target = input("Enter Facebook group URL or name: ").strip()
 
     if not group_target:
-        print("❌ No Facebook group specified for Playwright fallback.")
+        print("❌ No Facebook group specified for Playwright.")
         return
 
-    scraper.process_group_posts(group_target, max_posts)
-    scraper.save_results()
+    scrape_only = (choice == '1')
+    scraper.process_group_posts(group_target, max_posts, scrape_only=scrape_only)
+    if not scrape_only:
+        scraper.save_results()
 
 
 if __name__ == "__main__":

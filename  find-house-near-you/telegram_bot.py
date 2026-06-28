@@ -3,7 +3,7 @@ import json
 import csv
 import time
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Literal
 
 from telethon.sync import TelegramClient
 from telethon.errors import SessionPasswordNeededError
@@ -143,51 +143,152 @@ class HouseHuntingBot:
                         return None
 
     def extract_location_with_gpt(self, message_text: str) -> Optional[Dict]:
-        """Use LLM (OpenAI or Gemini) to extract location and rental information from message text."""
-        try:
-            prompt = f"""
-            Analyze this rental property message and extract the following information in JSON format:
-            - location: The specific area/locality/neighborhood mentioned
-            - city: The city name
-            - rent: The rental amount mentioned (extract number only)
-            - bhk: Number of bedrooms (1BHK, 2BHK, etc.)
-            - additional_details: Any other relevant details (furnished, parking, etc.)
-            
-            Message: "{message_text}"
-            
-            Return only valid JSON. If no clear location is found, return null for location.
+        """Use LLM (OpenAI or Gemini) to extract location and rental details using Function Calling (Tools)."""
+        
+        def extract_property_details(
+            location: str, 
+            city: str, 
+            rent: float, 
+            bhk: str, 
+            gender_preference: Literal['male', 'female', 'family', 'bachelor', 'any'],
+            furnishing_status: Literal['fully furnished', 'semi furnished', 'unfurnished'],
+            additional_details: str
+        ):
             """
+            Extract specific locality/neighborhood and rent details from a residential rental listing post.
+            
+            Args:
+                location: The specific area/locality/neighborhood mentioned (e.g. 'Balewadi', 'Baner'). Return None or empty if no specific area is mentioned.
+                city: The city name (e.g. 'Pune', 'Mumbai').
+                rent: The monthly rent amount mentioned as a number (e.g. 25000). Return None or 0 if not specified.
+                bhk: The configuration of the property (e.g. '1BHK', '2BHK', '1 RK').
+                gender_preference: Preferred gender or type of tenants. Choose 'any' if not explicitly specified.
+                furnishing_status: Furnishing state of the property. Choose 'unfurnished' if not specified.
+                additional_details: Any other relevant details (furnished, deposit, parking, etc.).
+            """
+            pass
 
-            result = self.call_llm(
-                prompt=prompt,
-                system_instruction="You are a helpful assistant that extracts location and rental information from text messages. Always respond with valid JSON.",
-                json_mode=True,
-                max_tokens=300,
-                temperature=0.1
-            )
-
-            if not result:
+        if self.model_provider == 'gemini':
+            if genai is None or types is None:
+                print("Error: google-genai library is not installed.")
                 return None
-
-            result = result.strip()
-            # Robust JSON extraction looking for outer curly braces
-            match = re.search(r'(\{.*\})', result, re.DOTALL)
-            if match:
-                json_str = match.group(1)
-            else:
-                json_str = result
-
             try:
-                return json.loads(json_str)
-            except json.JSONDecodeError as jde:
-                print(f"⚠️ Failed to parse LLM JSON response: {jde}. Raw response was: {result!r}")
+                if not hasattr(self, 'gemini_client'):
+                    api_key = os.getenv('GEMINI_API_KEY')
+                    if api_key and api_key.startswith('AIzaSy'):
+                        self.gemini_client = genai.Client(api_key=api_key)
+                    else:
+                        self.gemini_client = genai.Client()
+                
+                model = self.model_name or 'gemini-2.5-flash'
+                
+                config = types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=300,
+                    tools=[extract_property_details],
+                    tool_config=types.ToolConfig(
+                        function_calling_config=types.FunctionCallingConfig(
+                            mode="ANY"
+                        )
+                    )
+                )
+                
+                response = self.gemini_client.models.generate_content(
+                    model=model,
+                    contents=message_text,
+                    config=config
+                )
+                
+                if response.function_calls:
+                    call = response.function_calls[0]
+                    return {
+                        'location': call.args.get('location'),
+                        'city': call.args.get('city'),
+                        'rent': call.args.get('rent'),
+                        'bhk': call.args.get('bhk'),
+                        'gender_preference': call.args.get('gender_preference'),
+                        'furnishing_status': call.args.get('furnishing_status'),
+                        'additional_details': call.args.get('additional_details')
+                    }
                 return None
-
-        except QuotaExceededError:
-            raise
-        except Exception as e:
-            print(f"Error extracting location: {e}")
-            return None
+                
+            except Exception as e:
+                err_str = str(e)
+                is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str or "limit exceeded" in err_str.lower()
+                if is_rate_limit:
+                    raise QuotaExceededError(f"Gemini quota exhausted: {e}")
+                print(f"Error extracting location with Gemini: {e}")
+                return None
+        else: # Default to OpenAI
+            try:
+                model = self.model_name or 'gpt-4o-mini'
+                
+                kwargs = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful assistant that extracts location and rental details from text listings."},
+                        {"role": "user", "content": message_text}
+                    ],
+                    "temperature": 0.1,
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "extract_property_details",
+                            "description": "Extract specific locality/neighborhood and rent details from a residential rental listing post.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string",
+                                        "description": "The specific area/locality/neighborhood mentioned (e.g. 'Balewadi', 'Baner')."
+                                    },
+                                    "city": {
+                                        "type": "string",
+                                        "description": "The city name (e.g. 'Pune', 'Mumbai')."
+                                    },
+                                    "rent": {
+                                        "type": "number",
+                                        "description": "The monthly rent amount mentioned as a number (e.g. 25000)."
+                                    },
+                                    "bhk": {
+                                        "type": "string",
+                                        "description": "The configuration of the property (e.g. '1BHK', '2BHK')."
+                                    },
+                                    "gender_preference": {
+                                        "type": "string",
+                                        "enum": ["male", "female", "family", "bachelor", "any"],
+                                        "description": "Preferred tenant type. Choose 'any' if not explicitly specified."
+                                    },
+                                    "furnishing_status": {
+                                        "type": "string",
+                                        "enum": ["fully furnished", "semi furnished", "unfurnished"],
+                                        "description": "Furnishing state of the property. Choose 'unfurnished' if not specified."
+                                    },
+                                    "additional_details": {
+                                        "type": "string",
+                                        "description": "Any other relevant details (furnished, deposit, parking, etc.)."
+                                    }
+                                },
+                                "required": ["location", "city", "rent", "bhk", "gender_preference", "furnishing_status", "additional_details"]
+                            }
+                        }
+                    }],
+                    "tool_choice": {"type": "function", "function": {"name": "extract_property_details"}}
+                }
+                
+                response = openai.chat.completions.create(**kwargs)
+                tool_calls = response.choices[0].message.tool_calls
+                if tool_calls:
+                    call = tool_calls[0]
+                    return json.loads(call.function.arguments)
+                return None
+            except Exception as e:
+                err_str = str(e)
+                is_rate_limit = "429" in err_str or "insufficient_quota" in err_str or "Rate limit" in err_str
+                if is_rate_limit:
+                    raise QuotaExceededError(f"OpenAI quota exhausted: {e}")
+                print(f"Error extracting location with OpenAI: {e}")
+                return None
 
 
     def get_coordinates(self, location: str, city: Optional[str] = None) -> Optional[Tuple[float, float]]:
@@ -256,16 +357,26 @@ class HouseHuntingBot:
         extracted_info = self.extract_location_with_gpt(message.text)
         if not extracted_info or not extracted_info.get('location'):
             return None
-        # Geocoding
-        coords = self.get_coordinates(
-            extracted_info['location'], extracted_info.get('city'))
-        if not coords:
-            return None
-        lat, lon = coords
-        # Distance calculation
-        dist_info = self.calculate_distance(lat, lon)
-        if not dist_info:
-            return None
+        
+        # Geocoding (optional)
+        lat = None
+        lon = None
+        distance_km = None
+        duration = None
+        
+        try:
+            coords = self.get_coordinates(
+                extracted_info['location'], extracted_info.get('city'))
+            if coords:
+                lat, lon = coords
+                # Distance calculation
+                dist_info = self.calculate_distance(lat, lon)
+                if dist_info:
+                    distance_km = dist_info['distance_km']
+                    duration = dist_info['duration']
+        except Exception as e:
+            print(f"⚠️ Geocoding/Distance calculation skipped: {e}")
+
         # Telegram link
         link = self.get_telegram_link(
             message, chat_entity) if chat_entity else None
@@ -277,11 +388,13 @@ class HouseHuntingBot:
             'city': extracted_info.get('city'),
             'rent': extracted_info.get('rent'),
             'bhk': extracted_info.get('bhk'),
+            'gender_preference': extracted_info.get('gender_preference', 'any'),
+            'furnishing_status': extracted_info.get('furnishing_status', 'unfurnished'),
             'additional_details': extracted_info.get('additional_details'),
             'latitude': lat,
             'longitude': lon,
-            'distance_from_office_km': dist_info['distance_km'],
-            'driving_duration': dist_info['duration'],
+            'distance_from_office_km': distance_km,
+            'driving_duration': duration,
             'telegram_link': link,
             'original_message': message.text[:200] + '...' if len(message.text) > 200 else message.text
         }
@@ -376,11 +489,11 @@ class HouseHuntingBot:
         filtered_results = self.results
         if max_distance:
             filtered_results = [
-                r for r in self.results if r['distance_from_office_km'] <= max_distance]
+                r for r in self.results if r.get('distance_from_office_km') is not None and r['distance_from_office_km'] <= max_distance]
 
         # Sort results
         if sort_by_distance:
-            filtered_results.sort(key=lambda x: x['distance_from_office_km'])
+            filtered_results.sort(key=lambda x: (x.get('distance_from_office_km') is None, x.get('distance_from_office_km') or 99999))
 
         print(f"\n🏠 Found {len(filtered_results)} Properties")
         if max_distance:
@@ -395,16 +508,22 @@ class HouseHuntingBot:
                 print(f"   💰 Rent: ₹{result['rent']}")
             if result['bhk']:
                 print(f"   🏠 Type: {result['bhk']}")
-            print(
-                f"   📏 Distance: {result['distance_from_office_km']} km from office")
-            if result['driving_duration']:
+            if result.get('gender_preference'):
+                print(f"   👥 Gender Preference: {result['gender_preference']}")
+            if result.get('furnishing_status'):
+                print(f"   🛋️  Furnished: {result['furnishing_status']}")
+            
+            dist = f"{result['distance_from_office_km']} km" if result.get('distance_from_office_km') is not None else "N/A"
+            print(f"   📏 Distance: {dist} from office")
+            
+            if result.get('driving_duration'):
                 print(f"   🚗 Drive Time: {result['driving_duration']}")
-            if result['additional_details']:
+            if result.get('additional_details'):
                 print(f"   ℹ️  Details: {result['additional_details']}")
             print(f"   📅 Posted: {result['date']}")
             if result.get('telegram_link'):
                 print(f"   🔗 Telegram Link: {result['telegram_link']}")
-            print(f"   💬 Message: {result['original_message'][:100]}...")
+            print(f"   💬 Message: {result['original_message'][:100]}..." if result.get('original_message') else "")
             print("-" * 40)
 
     def load_existing_results(self, filename: str):
