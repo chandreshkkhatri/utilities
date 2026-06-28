@@ -33,13 +33,18 @@ class FacebookGroupScraper:
                 user_data_dir=user_data_path,
                 headless=False,
                 channel="chrome",
-                args=["--disable-blink-features=AutomationControlled"]
+                args=["--disable-blink-features=AutomationControlled"],
+                ignore_default_args=["--no-sandbox"]
             )
             self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         except Exception as e:
             print(f"⚠️ Could not launch Chrome with configured profile: {e}")
             print("Launching standard Chrome instance instead...")
-            self.browser = self.playwright.chromium.launch(headless=False, channel="chrome")
+            self.browser = self.playwright.chromium.launch(
+                headless=False,
+                channel="chrome",
+                ignore_default_args=["--no-sandbox"]
+            )
             self.context = self.browser.new_context()
             self.page = self.context.new_page()
 
@@ -115,18 +120,6 @@ class FacebookGroupScraper:
             # Get new count
             posts_count = self.page.locator(post_selector).count()
 
-            # Expand "See more" buttons for the last few posts dynamically
-            try:
-                see_more_locator = self.page.locator("//span[contains(text(), 'See more') or contains(text(), 'See More')]")
-                see_more_count = see_more_locator.count()
-                for i in range(max(0, see_more_count - 5), see_more_count):
-                    try:
-                        see_more_locator.nth(i).click(timeout=1000)
-                    except:
-                        pass
-            except:
-                pass
-
         print(f"📊 Found {posts_count} posts loaded in DOM")
         return posts_count
 
@@ -135,7 +128,7 @@ class FacebookGroupScraper:
         try:
             # Expand 'See more' links within the post
             try:
-                buttons_locator = post_element.locator("span:has-text('See more'), span:has-text('See More')")
+                buttons_locator = post_element.locator("[role='button']:has-text('See more'), [role='button']:has-text('See More')")
                 buttons_count = buttons_locator.count()
                 for i in range(buttons_count):
                     try:

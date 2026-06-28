@@ -36,14 +36,19 @@ def main():
                 "user_data_dir": user_data_path,
                 "headless": False,
                 "channel": "chrome",
-                "args": ["--disable-blink-features=AutomationControlled"]
+                "args": ["--disable-blink-features=AutomationControlled"],
+                "ignore_default_args": ["--no-sandbox"]
             }
             context = p.chromium.launch_persistent_context(**context_args)
             page = context.pages[0] if context.pages else context.new_page()
         except Exception as e:
             print(f"⚠️ Could not launch Chrome with configured profile: {e}")
             print("Launching standard Chrome instance instead...")
-            browser = p.chromium.launch(headless=False, channel="chrome")
+            browser = p.chromium.launch(
+                headless=False,
+                channel="chrome",
+                ignore_default_args=["--no-sandbox"]
+            )
             context = browser.new_context()
             page = context.new_page()
 
