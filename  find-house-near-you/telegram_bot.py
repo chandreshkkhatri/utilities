@@ -9,6 +9,13 @@ from dotenv import load_dotenv
 import openai
 import googlemaps
 
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
+
 # Load environment variables
 load_dotenv()
 
@@ -22,7 +29,11 @@ class HouseHuntingBot:
         self.target_chat = os.getenv('TARGET_CHAT', 'me')
         self.target_peer_id = os.getenv('TARGET_PEER_ID')
         if self.target_peer_id:
-            self.target_peer_id = self.target_peer_id.strip().strip("'""")
+            self.target_peer_id = self.target_peer_id.strip().strip("'\"")
+
+        # LLM Provider Configuration
+        self.model_provider = os.getenv('MODEL_PROVIDER', 'openai').strip().lower()
+        self.model_name = os.getenv('MODEL_NAME')
 
         # OpenAI setup
         openai.api_key = os.getenv('OPENAI_API_KEY')
@@ -39,8 +50,70 @@ class HouseHuntingBot:
         # Results storage
         self.results = []
 
+    def call_llm(self, prompt: str, system_instruction: Optional[str] = None, json_mode: bool = False, max_tokens: int = 300, temperature: float = 0.1) -> Optional[str]:
+        """A unified method to call either OpenAI or Gemini depending on setup."""
+        if self.model_provider == 'gemini':
+            if genai is None or types is None:
+                print("Error: google-genai library is not installed.")
+                return None
+            try:
+                if not hasattr(self, 'gemini_client'):
+                    api_key = os.getenv('GEMINI_API_KEY')
+                    if api_key:
+                        self.gemini_client = genai.Client(api_key=api_key)
+                    else:
+                        self.gemini_client = genai.Client()
+                
+                model = self.model_name or 'gemini-2.5-flash'
+                
+                config_args = {
+                    'temperature': temperature,
+                }
+                if system_instruction:
+                    config_args['system_instruction'] = system_instruction
+                if json_mode:
+                    config_args['response_mime_type'] = 'application/json'
+                if max_tokens:
+                    config_args['max_output_tokens'] = max_tokens
+                
+                config = types.GenerateContentConfig(**config_args)
+                
+                response = self.gemini_client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=config
+                )
+                return response.text
+            except Exception as e:
+                print(f"Error calling Gemini: {e}")
+                return None
+        else: # Default to OpenAI
+            try:
+                model = self.model_name or 'gpt-4o-mini'
+                
+                messages = []
+                if system_instruction:
+                    messages.append({"role": "system", "content": system_instruction})
+                messages.append({"role": "user", "content": prompt})
+                
+                kwargs = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature
+                }
+                if max_tokens:
+                    kwargs["max_tokens"] = max_tokens
+                if json_mode:
+                    kwargs["response_format"] = {"type": "json_object"}
+                
+                response = openai.chat.completions.create(**kwargs)
+                return response.choices[0].message.content
+            except Exception as e:
+                print(f"Error calling OpenAI: {e}")
+                return None
+
     def extract_location_with_gpt(self, message_text: str) -> Optional[Dict]:
-        """Use GPT to extract location and rental information from message text."""
+        """Use LLM (OpenAI or Gemini) to extract location and rental information from message text."""
         try:
             prompt = f"""
             Analyze this rental property message and extract the following information in JSON format:
@@ -55,17 +128,18 @@ class HouseHuntingBot:
             Return only valid JSON. If no clear location is found, return null for location.
             """
 
-            response = openai.chat.completions.create(
-                model="gpt-4.1",
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that extracts location and rental information from text messages. Always respond with valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
+            result = self.call_llm(
+                prompt=prompt,
+                system_instruction="You are a helpful assistant that extracts location and rental information from text messages. Always respond with valid JSON.",
+                json_mode=True,
                 max_tokens=300,
                 temperature=0.1
             )
 
-            result = (response.choices[0].message.content or '').strip()
+            if not result:
+                return None
+
+            result = result.strip()
             # Clean up the response to ensure it's valid JSON
             if result.startswith('```json'):
                 result = result[7:-3]
@@ -75,8 +149,9 @@ class HouseHuntingBot:
             return json.loads(result)
 
         except Exception as e:
-            print(f"Error extracting location with GPT: {e}")
+            print(f"Error extracting location: {e}")
             return None
+
 
     def get_coordinates(self, location: str, city: Optional[str] = None) -> Optional[Tuple[float, float]]:
         """Get latitude and longitude for a location using Google Maps."""
@@ -313,10 +388,19 @@ def main():
     """Main function to run the house hunting bot."""
 
     # Check if required environment variables are set
-    required_vars = ['TELEGRAM_API_ID', 'TELEGRAM_API_HASH',
-                     'TELEGRAM_PHONE', 'OPENAI_API_KEY', 'GOOGLE_MAPS_API_KEY']
-    missing_vars = [var for var in required_vars if not os.getenv(
-        var) or os.getenv(var) == 'your_openai_api_key_here' or os.getenv(var) == 'your_google_maps_api_key_here']
+    provider = os.getenv('MODEL_PROVIDER', 'openai').strip().lower()
+    required_vars = ['TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_PHONE', 'GOOGLE_MAPS_API_KEY']
+    if provider == 'gemini':
+        required_vars.append('GEMINI_API_KEY')
+    else:
+        required_vars.append('OPENAI_API_KEY')
+
+    missing_vars = [
+        var for var in required_vars 
+        if not os.getenv(var) or os.getenv(var) in [
+            'your_openai_api_key_here', 'your_google_maps_api_key_here', 'your_gemini_api_key_here', ''
+        ]
+    ]
 
     if missing_vars:
         print("❌ Missing required environment variables:")
