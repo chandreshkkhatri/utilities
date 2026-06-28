@@ -175,7 +175,7 @@ class HouseHuntingBot:
             try:
                 if not hasattr(self, 'gemini_client'):
                     api_key = os.getenv('GEMINI_API_KEY')
-                    if api_key and api_key.startswith('AIzaSy'):
+                    if api_key:
                         self.gemini_client = genai.Client(api_key=api_key)
                     else:
                         self.gemini_client = genai.Client()
@@ -184,7 +184,7 @@ class HouseHuntingBot:
                 
                 config = types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=300,
+                    max_output_tokens=2048,
                     tools=[extract_property_details],
                     tool_config=types.ToolConfig(
                         function_calling_config=types.FunctionCallingConfig(

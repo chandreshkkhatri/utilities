@@ -320,11 +320,11 @@ class FacebookGroupScraper:
                 prompt=prompt,
                 system_instruction="Reply with only YES or NO. Do not add any introduction or explanations.",
                 temperature=0.0,
-                max_tokens=15
+                max_tokens=1024
             )
             if response:
                 answer = response.strip().lower()
-                return answer.startswith("yes")
+                return "yes" in answer
         except Exception:
             pass
         # Fallback to simple keyword check
@@ -862,7 +862,7 @@ class FacebookGroupScraper:
             print(f"⚠️ Failed to save raw posts to {filepath}: {e}")
 
     def analyze_scraped_posts(self):
-        """Analyze previously scraped posts from results/facebook_raw_posts.json using LLM + Google Maps."""
+        """Analyze previously scraped posts from results/facebook_raw_posts.json using LLM + Google Maps in parallel."""
         self.group_dir = self.choose_group_dir_interactively()
         if not self.group_dir:
             print("❌ No raw posts found to analyze. Please run the scraper first.")
@@ -893,27 +893,43 @@ class FacebookGroupScraper:
                     'source', 'group_name'
                 ])
 
+        # Filter out posts that are already processed
+        posts_to_process = []
+        for idx, post in enumerate(raw_posts):
+            post_url = post.get('post_url')
+            if post_url and post_url in processed_urls:
+                continue
+            posts_to_process.append((idx + 1, post))
+
         total_posts = len(raw_posts)
-        processed_count = 0
-        added_count = 0
+        to_process_count = len(posts_to_process)
+        if to_process_count == 0:
+            print("✅ All posts have already been analyzed!")
+            return
 
-        print(f"📊 Loaded {total_posts} raw posts. Starting processing...")
+        print(f"📊 Loaded {total_posts} raw posts. {to_process_count} posts need analysis. Processing in parallel...")
+
+        import concurrent.futures
+        import threading
         
-        try:
-            for idx, post in enumerate(raw_posts):
-                post_url = post.get('post_url')
-                text = post.get('text', '')
-                message_id = post.get('message_id', f"fb_post_{idx+1}")
-                group_name = post.get('group_name', 'unknown')
+        write_lock = threading.Lock()
+        
+        added_count = 0
+        processed_count = 0
+        quota_exhausted = False
 
-                # Skip if already in final results
-                if post_url and post_url in processed_urls:
-                    print(f"⏭️ [{idx+1}/{total_posts}] Skipping already processed post (URL): {post_url}")
-                    continue
+        def process_single_post(item):
+            nonlocal added_count, processed_count, quota_exhausted
+            if quota_exhausted:
+                return
 
-                processed_count += 1
-                print(f"🤖 [{idx+1}/{total_posts}] Processing {message_id}...")
+            original_idx, post = item
+            post_url = post.get('post_url')
+            text = post.get('text', '')
+            message_id = post.get('message_id', f"fb_post_{original_idx}")
+            group_name = post.get('group_name', 'unknown')
 
+            try:
                 is_rental = self.is_rental_post(text)
                 
                 log_entry = (
@@ -925,8 +941,11 @@ class FacebookGroupScraper:
 
                 if not is_rental:
                     log_entry += "Result: SKIPPED (Not classified as rental post)\n\n"
-                    self.log_ingestion(log_entry)
-                    continue
+                    with write_lock:
+                        self.log_ingestion(log_entry)
+                        processed_count += 1
+                        print(f"🤖 [{processed_count}/{to_process_count}] fb_post_{original_idx} analyzed (skipped - not rental)")
+                    return
 
                 # Prepare raw_data dict format matching process_raw_data expectations
                 raw_data = {
@@ -948,44 +967,60 @@ class FacebookGroupScraper:
                         f"  Furnishing Status: {result.get('furnishing_status')}\n"
                         f"  Distance: {result.get('distance_from_office_km')} km\n\n"
                     )
-                    self.log_ingestion(log_entry)
                     
-                    result.update({'group_name': group_name})
-                    self.bot.results.append(result)
-                    if post_url:
-                        processed_urls.add(post_url)
-                    
-                    # Write to final CSV
-                    with open(res_master, 'a', newline='', encoding='utf-8') as rf:
-                        writer = csv.writer(rf)
-                        writer.writerow([
-                            result['message_id'], result['date'], result['location'],
-                            result.get('city', ''), result.get('rent', ''),
-                            result.get('bhk', ''),
-                            result.get('gender_preference', 'any'),
-                            result.get('furnishing_status', 'unfurnished'),
-                            result.get('additional_details', ''),
-                            result['latitude'], result['longitude'],
-                            result['distance_from_office_km'], result['driving_duration'],
-                            result['post_url'], result['source'], result['group_name']
-                        ])
-                    
-                    added_count += 1
-                    print(f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office")
+                    with write_lock:
+                        self.log_ingestion(log_entry)
+                        result.update({'group_name': group_name})
+                        self.bot.results.append(result)
+                        if post_url:
+                            processed_urls.add(post_url)
+                        
+                        # Write to final CSV
+                        with open(res_master, 'a', newline='', encoding='utf-8') as rf:
+                            writer = csv.writer(rf)
+                            writer.writerow([
+                                result['message_id'], result['date'], result['location'],
+                                result.get('city', ''), result.get('rent', ''),
+                                result.get('bhk', ''),
+                                result.get('gender_preference', 'any'),
+                                result.get('furnishing_status', 'unfurnished'),
+                                result.get('additional_details', ''),
+                                result['latitude'], result['longitude'],
+                                result['distance_from_office_km'], result['driving_duration'],
+                                result['post_url'], result['source'], result['group_name']
+                            ])
+                        
+                        added_count += 1
+                        processed_count += 1
+                        print(f"🏡 [{processed_count}/{to_process_count}] Found property: {result['location']} - {result['distance_from_office_km']}km from office")
                 else:
                     log_entry += "Result: SKIPPED (AI extraction failed or empty location)\n\n"
-                    self.log_ingestion(log_entry)
+                    with write_lock:
+                        self.log_ingestion(log_entry)
+                        processed_count += 1
+                        print(f"🤖 [{processed_count}/{to_process_count}] fb_post_{original_idx} analyzed (skipped - AI extraction failed)")
 
-            self.bot.save_results(f'{safe_name}/facebook_results.json')
-            print(f"\n✅ Analysis complete. Processed {processed_count} new posts, found {added_count} matching listings.")
+            except QuotaExceededError as qe:
+                with write_lock:
+                    if not quota_exhausted:
+                        print(f"\n🛑 LLM Quota Exceeded during parallel processing: {qe}")
+                        quota_exhausted = True
+            except Exception as e:
+                with write_lock:
+                    processed_count += 1
+                    print(f"⚠️ Error processing post {message_id}: {e}")
 
-        except QuotaExceededError as qe:
-            print(f"\n🛑 LLM Quota Exceeded during offline analysis: {qe}")
-            self.bot.save_results(f'{safe_name}/facebook_results.json')
-            print("Progress saved.")
-        except Exception as e:
-            print(f"❌ Error during analysis: {e}")
-            self.bot.save_results(f'{safe_name}/facebook_results.json')
+        # Use 5 parallel workers
+        num_workers = 5
+        print(f"🧵 Launching {num_workers} parallel workers...")
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                executor.map(process_single_post, posts_to_process)
+        except Exception as ex:
+            print(f"⚠️ Thread pool execution error: {ex}")
+
+        self.bot.save_results(f'{safe_name}/facebook_results.json')
+        print(f"\n✅ Parallel analysis complete. Processed {processed_count} posts, found {added_count} matching listings.")
 
 
 def main():
