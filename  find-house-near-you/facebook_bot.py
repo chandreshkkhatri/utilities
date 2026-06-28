@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 
-from telegram_bot import HouseHuntingBot
+from telegram_bot import HouseHuntingBot, QuotaExceededError
 
 
 class FacebookGroupScraper:
@@ -96,54 +96,50 @@ class FacebookGroupScraper:
             return False
 
     def scroll_and_load_posts(self, max_posts=50, max_scroll_time=300):
-        """Scroll through the group feed to load posts."""
+        """Scroll through the group feed to load posts using fast locator count."""
         print(f"🔄 Loading posts (max {max_posts} posts, {max_scroll_time}s timeout)")
 
         start_time = time.time()
-        
-        # More robust selector for posts
         post_selector = "div.x1a2a7pz[aria-posinset]"
-        posts_found = 0
+        
+        # Fast element counting
+        posts_count = self.page.locator(post_selector).count()
 
-        while posts_found < max_posts and (time.time() - start_time) < max_scroll_time:
+        while posts_count < max_posts and (time.time() - start_time) < max_scroll_time:
             # Scroll down
             self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
 
             # Wait for new content to load
             self.page.wait_for_timeout(2000)
 
-            # Check current number of posts
-            try:
-                posts = self.page.query_selector_all(post_selector)
-                posts_found = len(posts)
+            # Get new count
+            posts_count = self.page.locator(post_selector).count()
 
-                # Try clicking "See More" buttons to load more text
-                see_more_buttons = self.page.query_selector_all("//span[contains(text(), 'See more') or contains(text(), 'See More')]")
-                for button in see_more_buttons[-3:]:
+            # Expand "See more" buttons for the last few posts dynamically
+            try:
+                see_more_locator = self.page.locator("//span[contains(text(), 'See more') or contains(text(), 'See More')]")
+                see_more_count = see_more_locator.count()
+                for i in range(max(0, see_more_count - 5), see_more_count):
                     try:
-                        button.click()
-                        self.page.wait_for_timeout(500)
+                        see_more_locator.nth(i).click(timeout=1000)
                     except:
                         pass
+            except:
+                pass
 
-            except Exception as e:
-                print(f"⚠️ Error counting posts: {e}")
-                break
-
-        final_posts = self.page.query_selector_all(post_selector)
-        print(f"📊 Found {len(final_posts)} posts to process")
-        return final_posts
+        print(f"📊 Found {posts_count} posts loaded in DOM")
+        return posts_count
 
     def extract_post_data(self, post_element):
-        """Extract text and metadata from a Facebook post."""
+        """Extract text and metadata from a Facebook post Locator."""
         try:
-            # Expand 'See more' links within the post to reveal full content
+            # Expand 'See more' links within the post
             try:
-                buttons = post_element.query_selector_all("span:has-text('See more'), span:has-text('See More')")
-                for btn in buttons:
+                buttons_locator = post_element.locator("span:has-text('See more'), span:has-text('See More')")
+                buttons_count = buttons_locator.count()
+                for i in range(buttons_count):
                     try:
-                        btn.click()
-                        self.page.wait_for_timeout(500)
+                        buttons_locator.nth(i).click(timeout=1000)
                     except:
                         pass
             except:
@@ -163,9 +159,10 @@ class FacebookGroupScraper:
             post_text = ""
             for selector in text_selectors:
                 try:
-                    elements = post_element.query_selector_all(selector)
-                    for element in elements:
-                        text = element.inner_text().strip()
+                    locator = post_element.locator(selector)
+                    count = locator.count()
+                    for i in range(count):
+                        text = locator.nth(i).inner_text().strip()
                         if text and len(text) > len(post_text):
                             post_text = text
                 except:
@@ -175,7 +172,7 @@ class FacebookGroupScraper:
                 return None
 
             # Try to extract timestamp
-            timestamp = datetime.now()  # Default to current time
+            timestamp = datetime.now()
 
             try:
                 time_selectors = [
@@ -186,37 +183,38 @@ class FacebookGroupScraper:
                 ]
 
                 for selector in time_selectors:
-                    time_elements = post_element.query_selector_all(selector)
-                    for time_elem in time_elements:
-                        time_text = time_elem.get_attribute('title') or time_elem.get_attribute('aria-label') or time_elem.inner_text()
+                    time_locator = post_element.locator(selector)
+                    count = time_locator.count()
+                    found = False
+                    for i in range(count):
+                        elem = time_locator.nth(i)
+                        time_text = elem.get_attribute('title') or elem.get_attribute('aria-label') or elem.inner_text()
                         if time_text and any(word in time_text.lower() for word in ['ago', 'at', 'yesterday', 'hour', 'min']):
                             timestamp = self.parse_facebook_time(time_text)
+                            found = True
                             break
-                    if timestamp != datetime.now():
+                    if found:
                         break
             except Exception as e:
                 print(f"⚠️ Error extracting timestamp: {e}")
 
             # Get post URL
             post_url = ''
-            # First, try to get URL from time element's parent link
             try:
-                time_elem = post_element.query_selector('time')
-                if time_elem:
-                    parent_link = time_elem.evaluate_handle("el => el.closest('a')")
-                    if parent_link:
-                        post_url = parent_link.json_value().get_attribute('href')
+                time_elem = post_element.locator('time')
+                if time_elem.count() > 0:
+                    parent_link = time_elem.locator("xpath=./ancestor::a")
+                    if parent_link.count() > 0:
+                        post_url = parent_link.first.get_attribute('href')
             except:
                 pass
-            # Fallback to any link matching common post patterns
             if not post_url:
                 try:
-                    link_elem = post_element.query_selector("a[href*='/posts/'], a[href*='/permalink/'], a[href*='story.php']")
-                    if link_elem:
-                        post_url = link_elem.get_attribute('href')
+                    link_locator = post_element.locator("a[href*='/posts/'], a[href*='/permalink/'], a[href*='story.php']")
+                    if link_locator.count() > 0:
+                        post_url = link_locator.first.get_attribute('href')
                 except:
                     pass
-            # Normalize URL to canonical group post link
             post_url = self.normalize_post_url(post_url)
 
             # Get element HTML for raw storage
@@ -323,7 +321,7 @@ class FacebookGroupScraper:
                 'source', 'group_name'
             ])
 
-        api_url = f"https://graph.facebook.com/v20.0/{group_id}/feed"
+        api_url = f"https://graph.facebook.com/v25.0/{group_id}/feed"
         params = {
             'fields': 'id,message,created_time,permalink_url',
             'access_token': access_token,
@@ -414,6 +412,9 @@ class FacebookGroupScraper:
                 self.bot.save_results('facebook_results.json')
                 api_url = resp_data.get('paging', {}).get('next')
 
+            except QuotaExceededError as qe:
+                print(f"\n🛑 LLM Quota Exceeded during Graph API processing: {qe}")
+                return False
             except Exception as e:
                 print(f"❌ Error during Facebook Graph API request: {e}")
                 return False
@@ -464,70 +465,77 @@ class FacebookGroupScraper:
             batch_size = 20  # Reduce batch size to 20 posts
             while self.posts_processed < max_posts:
                 target_load = min(self.posts_processed + batch_size, max_posts)
-                posts = self.scroll_and_load_posts(max_posts=target_load)
-                if not posts or len(posts) <= self.posts_processed:
+                loaded_count = self.scroll_and_load_posts(max_posts=target_load)
+                if loaded_count <= self.posts_processed:
                     print("📄 No new posts to process")
                     break
 
-                batch_posts = posts[self.posts_processed:target_load]
+                actual_target = min(target_load, loaded_count)
 
                 # Save raw batch to CSV with post URLs and debug info
-                raw_file = f"results/facebook_raw_{self.posts_processed+1}_{target_load}.csv"
-                with open(raw_file, 'w', newline='', encoding='utf-8') as rf:
-                    writer = csv.writer(rf)
-                    writer.writerow(
-                        ['message_id', 'text', 'timestamp', 'post_url'])
-                    raw_data_list = []
-                    for idx, post in enumerate(batch_posts, start=self.posts_processed+1):
-                        try:
-                            cls = post.get_attribute('class') or ''
-                            if 'x1a2a7pz' not in cls:
-                                print(f"⚠️ Skipping element {idx} - doesn't match post selector")
-                                continue
-                        except Exception as e:
-                            print(f"⚠️ Error validating element {idx}: {e}")
-                            continue
-
-                        html_path = f"results/html/fb_post_{idx}.html"
-                        self.save_post_html(post, html_path)
-
-                        data = self.extract_post_data(post) or {}
-                        data['message_id'] = f"fb_post_{idx}"
-                        data['html_file'] = html_path
-                        text = ' '.join(data.get('text', '').split())
-                        if not text or not self.is_rental_post(text):
-                            continue
-                        raw_data_list.append(data)
-                        writer.writerow([data['message_id'], text, data.get(
-                            'timestamp', ''), data.get('post_url', '')])
-                print(f"🔖 Raw batch saved to {raw_file}")
-
-                batch_results = []
-                for data in raw_data_list:
-                    if self.skip_based_on_preference(data['text']):
-                        continue
-                    result = self.process_raw_data(data)
-                    if result:
-                        result.update({'group_name': group_url_or_name})
-                        batch_results.append(result)
-                        self.bot.results.append(result)
-                        print(
-                            f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office")
-
-                if batch_results:
-                    with open(res_master, 'a', newline='', encoding='utf-8') as rf:
+                raw_file = f"results/facebook_raw_{self.posts_processed+1}_{actual_target}.csv"
+                try:
+                    with open(raw_file, 'w', newline='', encoding='utf-8') as rf:
                         writer = csv.writer(rf)
-                        for result in batch_results:
-                            writer.writerow([
-                                result['message_id'], result['date'], result['location'],
-                                result.get('city', ''), result.get('rent', ''),
-                                result.get('bhk', ''), result.get('additional_details', ''),
-                                result['latitude'], result['longitude'],
-                                result['distance_from_office_km'], result['driving_duration'],
-                                result['post_url'], result['source'], result['group_name']
-                            ])
+                        writer.writerow(
+                            ['message_id', 'text', 'timestamp', 'post_url'])
+                        raw_data_list = []
+                        post_locator = self.page.locator("div.x1a2a7pz[aria-posinset]")
+                        for idx in range(self.posts_processed, actual_target):
+                            post = post_locator.nth(idx)
+                            try:
+                                cls = post.get_attribute('class') or ''
+                                if 'x1a2a7pz' not in cls:
+                                    print(f"⚠️ Skipping element {idx+1} - doesn't match post selector")
+                                    continue
+                            except Exception as e:
+                                print(f"⚠️ Error validating element {idx+1}: {e}")
+                                continue
 
-                self.posts_processed = target_load
+                            html_path = f"results/html/fb_post_{idx+1}.html"
+                            self.save_post_html(post, html_path)
+
+                            data = self.extract_post_data(post) or {}
+                            data['message_id'] = f"fb_post_{idx+1}"
+                            data['html_file'] = html_path
+                            text = ' '.join(data.get('text', '').split())
+                            if not text or not self.is_rental_post(text):
+                                continue
+                            raw_data_list.append(data)
+                            writer.writerow([data['message_id'], text, data.get(
+                                'timestamp', ''), data.get('post_url', '')])
+                    print(f"🔖 Raw batch saved to {raw_file}")
+
+                    batch_results = []
+                    for data in raw_data_list:
+                        if self.skip_based_on_preference(data['text']):
+                            continue
+                        result = self.process_raw_data(data)
+                        if result:
+                            result.update({'group_name': group_url_or_name})
+                            batch_results.append(result)
+                            self.bot.results.append(result)
+                            print(
+                                f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office")
+
+                    if batch_results:
+                        with open(res_master, 'a', newline='', encoding='utf-8') as rf:
+                            writer = csv.writer(rf)
+                            for result in batch_results:
+                                writer.writerow([
+                                    result['message_id'], result['date'], result['location'],
+                                    result.get('city', ''), result.get('rent', ''),
+                                    result.get('bhk', ''), result.get('additional_details', ''),
+                                    result['latitude'], result['longitude'],
+                                    result['distance_from_office_km'], result['driving_duration'],
+                                    result['post_url'], result['source'], result['group_name']
+                                ])
+                except QuotaExceededError as qe:
+                    print(f"\n🛑 LLM Quota Exceeded during Facebook processing: {qe}")
+                    print("Stopping Facebook scraping and saving current progress...")
+                    break
+
+                self.posts_processed = actual_target
                 if self.posts_processed < max_posts:
                     print(f"🔄 Loading next batch...")
 

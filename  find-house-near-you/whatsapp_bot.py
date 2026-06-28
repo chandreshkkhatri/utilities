@@ -7,7 +7,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
-from telegram_bot import HouseHuntingBot
+from telegram_bot import HouseHuntingBot, QuotaExceededError
 
 
 def main():
@@ -119,6 +119,10 @@ def main():
                 if result:
                     bot.results.append(result)
                     print(f"🏡 Found property: {result['location']} - {result['distance_from_office_km']}km from office")
+            except QuotaExceededError as qe:
+                print(f"\n🛑 LLM Quota Exceeded during WhatsApp processing: {qe}")
+                print("Stopping WhatsApp scraping and saving progress...")
+                break
             except Exception:
                 continue
 

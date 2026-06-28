@@ -1,6 +1,8 @@
 import os
 import json
 import csv
+import time
+import re
 from typing import Any, Dict, Optional, Tuple
 
 from telethon.sync import TelegramClient
@@ -18,6 +20,11 @@ except ImportError:
 
 # Load environment variables
 load_dotenv()
+
+
+class QuotaExceededError(Exception):
+    """Custom exception raised when LLM API quota or rate limit is completely exhausted."""
+    pass
 
 
 class HouseHuntingBot:
@@ -50,67 +57,90 @@ class HouseHuntingBot:
         # Results storage
         self.results = []
 
-    def call_llm(self, prompt: str, system_instruction: Optional[str] = None, json_mode: bool = False, max_tokens: int = 300, temperature: float = 0.1) -> Optional[str]:
-        """A unified method to call either OpenAI or Gemini depending on setup."""
-        if self.model_provider == 'gemini':
-            if genai is None or types is None:
-                print("Error: google-genai library is not installed.")
-                return None
-            try:
-                if not hasattr(self, 'gemini_client'):
-                    api_key = os.getenv('GEMINI_API_KEY')
-                    if api_key:
-                        self.gemini_client = genai.Client(api_key=api_key)
+    def call_llm(self, prompt: str, system_instruction: Optional[str] = None, json_mode: bool = False, max_tokens: int = 300, temperature: float = 0.1, retries: int = 3) -> Optional[str]:
+        """A unified method to call either OpenAI or Gemini depending on setup, with retry logic for rate limits."""
+        for attempt in range(retries):
+            if self.model_provider == 'gemini':
+                if genai is None or types is None:
+                    print("Error: google-genai library is not installed.")
+                    return None
+                try:
+                    if not hasattr(self, 'gemini_client'):
+                        api_key = os.getenv('GEMINI_API_KEY')
+                        if api_key:
+                            self.gemini_client = genai.Client(api_key=api_key)
+                        else:
+                            self.gemini_client = genai.Client()
+                    
+                    model = self.model_name or 'gemini-2.5-flash'
+                    
+                    config_args = {
+                        'temperature': temperature,
+                    }
+                    if system_instruction:
+                        config_args['system_instruction'] = system_instruction
+                    if json_mode:
+                        config_args['response_mime_type'] = 'application/json'
+                    if max_tokens:
+                        config_args['max_output_tokens'] = max_tokens
+                    
+                    config = types.GenerateContentConfig(**config_args)
+                    
+                    response = self.gemini_client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=config
+                    )
+                    return response.text
+                except Exception as e:
+                    err_str = str(e)
+                    is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "Quota exceeded" in err_str or "limit exceeded" in err_str.lower()
+                    if is_rate_limit and attempt < retries - 1:
+                        wait_time = 5
+                        match = re.search(r"retry in ([\d\.]+)s", err_str, re.IGNORECASE)
+                        if match:
+                            wait_time = int(float(match.group(1))) + 1
+                        print(f"⚠️ Gemini rate limit hit. Waiting {wait_time}s before retry (attempt {attempt+1}/{retries})...")
+                        time.sleep(wait_time)
+                        continue
+                    elif is_rate_limit:
+                        raise QuotaExceededError(f"Gemini quota exhausted: {e}")
                     else:
-                        self.gemini_client = genai.Client()
-                
-                model = self.model_name or 'gemini-2.5-flash'
-                
-                config_args = {
-                    'temperature': temperature,
-                }
-                if system_instruction:
-                    config_args['system_instruction'] = system_instruction
-                if json_mode:
-                    config_args['response_mime_type'] = 'application/json'
-                if max_tokens:
-                    config_args['max_output_tokens'] = max_tokens
-                
-                config = types.GenerateContentConfig(**config_args)
-                
-                response = self.gemini_client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=config
-                )
-                return response.text
-            except Exception as e:
-                print(f"Error calling Gemini: {e}")
-                return None
-        else: # Default to OpenAI
-            try:
-                model = self.model_name or 'gpt-4o-mini'
-                
-                messages = []
-                if system_instruction:
-                    messages.append({"role": "system", "content": system_instruction})
-                messages.append({"role": "user", "content": prompt})
-                
-                kwargs = {
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature
-                }
-                if max_tokens:
-                    kwargs["max_tokens"] = max_tokens
-                if json_mode:
-                    kwargs["response_format"] = {"type": "json_object"}
-                
-                response = openai.chat.completions.create(**kwargs)
-                return response.choices[0].message.content
-            except Exception as e:
-                print(f"Error calling OpenAI: {e}")
-                return None
+                        print(f"Error calling Gemini: {e}")
+                        return None
+            else: # Default to OpenAI
+                try:
+                    model = self.model_name or 'gpt-4o-mini'
+                    
+                    messages = []
+                    if system_instruction:
+                        messages.append({"role": "system", "content": system_instruction})
+                    messages.append({"role": "user", "content": prompt})
+                    
+                    kwargs = {
+                        "model": model,
+                        "messages": messages,
+                        "temperature": temperature
+                    }
+                    if max_tokens:
+                        kwargs["max_tokens"] = max_tokens
+                    if json_mode:
+                        kwargs["response_format"] = {"type": "json_object"}
+                    
+                    response = openai.chat.completions.create(**kwargs)
+                    return response.choices[0].message.content
+                except Exception as e:
+                    err_str = str(e)
+                    is_rate_limit = "429" in err_str or "insufficient_quota" in err_str or "Rate limit" in err_str
+                    if is_rate_limit and attempt < retries - 1:
+                        print(f"⚠️ OpenAI rate limit hit. Waiting 5s before retry (attempt {attempt+1}/{retries})...")
+                        time.sleep(5)
+                        continue
+                    elif is_rate_limit:
+                        raise QuotaExceededError(f"OpenAI quota exhausted: {e}")
+                    else:
+                        print(f"Error calling OpenAI: {e}")
+                        return None
 
     def extract_location_with_gpt(self, message_text: str) -> Optional[Dict]:
         """Use LLM (OpenAI or Gemini) to extract location and rental information from message text."""
@@ -140,14 +170,21 @@ class HouseHuntingBot:
                 return None
 
             result = result.strip()
-            # Clean up the response to ensure it's valid JSON
-            if result.startswith('```json'):
-                result = result[7:-3]
-            elif result.startswith('```'):
-                result = result[3:-3]
+            # Robust JSON extraction looking for outer curly braces
+            match = re.search(r'(\{.*\})', result, re.DOTALL)
+            if match:
+                json_str = match.group(1)
+            else:
+                json_str = result
 
-            return json.loads(result)
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError as jde:
+                print(f"⚠️ Failed to parse LLM JSON response: {jde}. Raw response was: {result!r}")
+                return None
 
+        except QuotaExceededError:
+            raise
         except Exception as e:
             print(f"Error extracting location: {e}")
             return None
@@ -311,12 +348,19 @@ class HouseHuntingBot:
                     self.save_results()
                     self.save_results_to_csv()
 
-                result = self.process_message(message, target_entity)
-                if result:
-                    found_properties += 1
-                    self.results.append(result)
-                    print(
-                        f"🏡 Found property #{found_properties}: {result['location']} - {result['distance_from_office_km']}km from office")
+                try:
+                    result = self.process_message(message, target_entity)
+                    if result:
+                        found_properties += 1
+                        self.results.append(result)
+                        print(
+                            f"🏡 Found property #{found_properties}: {result['location']} - {result['distance_from_office_km']}km from office")
+                except QuotaExceededError as qe:
+                    print(f"\n🛑 LLM Quota Exceeded: {qe}")
+                    print("Stopping analysis and saving gathered properties...")
+                    self.save_results()
+                    self.save_results_to_csv()
+                    break
 
             print(f"\n📊 Analysis Complete!")
             print(f"📱 Total messages processed: {processed_count}")
